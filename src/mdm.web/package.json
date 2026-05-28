@@ -16,7 +16,7 @@
     "ag-charts-enterprise": "13.2.1",
     "ag-grid-enterprise": "^35.2.1",
     "ag-grid-react": "^35.2.1",
-    "axios": "1.15.0",
+    "axios": "1.15.2",
     "daisyui": "^5.5.19",
     "driver.js": "^1.4.0",
     "file-saver": "^2.0.5",
