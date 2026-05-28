@@ -17,10 +17,11 @@ import (
 type WebhookHandler struct {
 	broker  port.EventBroker
 	devices port.DeviceRepository
+	mdm     port.MicroMDMClient
 }
 
-func NewWebhookHandler(broker port.EventBroker, devices port.DeviceRepository) *WebhookHandler {
-	return &WebhookHandler{broker: broker, devices: devices}
+func NewWebhookHandler(broker port.EventBroker, devices port.DeviceRepository, mdm port.MicroMDMClient) *WebhookHandler {
+	return &WebhookHandler{broker: broker, devices: devices, mdm: mdm}
 }
 
 func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -68,11 +69,53 @@ func (h *WebhookHandler) ProcessEvent(raw map[string]interface{}) {
 		event.EventType = "checkin"
 		if m, ok := checkin.(map[string]interface{}); ok {
 			event.UDID, _ = m["udid"].(string)
+			serial, _ := m["serial_number"].(string)
+			h.handleCheckin(event.UDID, serial)
 		}
 	}
 
 	log.Printf("[webhook] event=%s udid=%s cmd=%s status=%s", event.EventType, event.UDID, event.CommandUUID, event.Status)
 	h.broker.Publish(event)
+}
+
+// handleCheckin records a device that checks in. Without this, a freshly
+// enrolled device never lands in the DB until someone triggers a manual sync.
+// For a device we've never seen, it also queries full DeviceInformation so the
+// record is populated automatically (the response arrives via acknowledge_event
+// and is stored by parseAndStoreResponse).
+func (h *WebhookHandler) handleCheckin(udid, serial string) {
+	if udid == "" || h.devices == nil {
+		return
+	}
+
+	_, err := h.devices.GetByUDID(context.Background(), udid)
+	isNew := err != nil
+
+	if err := h.devices.Upsert(context.Background(), &domain.Device{
+		UDID:             udid,
+		SerialNumber:     serial,
+		LastSeen:         time.Now(),
+		EnrollmentStatus: "enrolled",
+	}); err != nil {
+		log.Printf("[webhook] checkin upsert %s: %v", udid, err)
+		return
+	}
+
+	if isNew && h.mdm != nil {
+		log.Printf("[webhook] new device checked in: udid=%s serial=%s — querying DeviceInformation", udid, serial)
+		go func() {
+			payload := map[string]interface{}{
+				"udid":         udid,
+				"request_type": "DeviceInformation",
+				"queries":      deviceInfoQueries(),
+			}
+			if _, err := h.mdm.SendCommand(context.Background(), payload); err != nil {
+				log.Printf("[webhook] checkin device info query %s: %v", udid, err)
+				return
+			}
+			_ = h.mdm.SendPush(context.Background(), udid)
+		}()
+	}
 }
 
 // parseAndStoreResponse decodes base64 plist XML and stores structured data in DB.

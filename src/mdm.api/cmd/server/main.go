@@ -137,7 +137,7 @@ func main() {
 	mux.Handle(path, handler)
 
 	// Webhook endpoint (no auth — MicroMDM calls this)
-	webhookHandler := service.NewWebhookHandler(broker, deviceRepo)
+	webhookHandler := service.NewWebhookHandler(broker, deviceRepo, mdmClient)
 	mux.Handle(cfg.WebhookPath, webhookHandler)
 
 	// SocketIO relay
