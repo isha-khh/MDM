@@ -177,3 +177,44 @@ func (c *Client) SyncDEP(ctx context.Context) error {
 	}
 	return nil
 }
+
+// DefineDEPProfile sends a full DEP profile body to MicroMDM, which forwards
+// it to Apple DEP. The template is an opaque JSON object (the same shape
+// mdmctl apply dep-profiles consumes) — we merge `serials` into its `devices`
+// field before sending. Returns the Apple-assigned profile UUID.
+//
+// Each call creates a NEW profile UUID on Apple's side and assigns the listed
+// serials to it. Pre-existing assignments on other serials are NOT modified
+// (the new profile UUID only attaches to the serials in this request).
+func (c *Client) DefineDEPProfile(ctx context.Context, template map[string]interface{}, serials []string) (string, error) {
+	if len(serials) == 0 {
+		return "", fmt.Errorf("micromdm: DefineDEPProfile needs at least one serial")
+	}
+	// Defensive copy so we don't mutate the caller's template.
+	body := make(map[string]interface{}, len(template)+1)
+	for k, v := range template {
+		body[k] = v
+	}
+	body["devices"] = serials
+
+	data, code, err := c.do(ctx, http.MethodPut, "/v1/dep/profiles", body)
+	if err != nil {
+		return "", err
+	}
+	if code < 200 || code >= 300 {
+		return "", fmt.Errorf("micromdm: define dep profile returned %d: %s", code, data)
+	}
+	// MicroMDM returns Apple's response verbatim, typically:
+	//   { "profile_uuid": "...", "devices": { "<serial>": "ASSIGNED" } }
+	var resp struct {
+		ProfileUUID string                 `json:"profile_uuid"`
+		Devices     map[string]interface{} `json:"devices"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", fmt.Errorf("micromdm: decode define dep profile response: %w (body: %s)", err, data)
+	}
+	if resp.ProfileUUID == "" {
+		return "", fmt.Errorf("micromdm: define dep profile returned no profile_uuid (body: %s)", data)
+	}
+	return resp.ProfileUUID, nil
+}

@@ -58,6 +58,27 @@ type CommandResult struct {
 	RawResponse string
 }
 
+// DEPAssignment tracks that a serial has had a DEP profile applied by the
+// auto-assigner. One row per serial; re-applying updates the row.
+type DEPAssignment struct {
+	SerialNumber   string
+	ProductFamily  string // as reported by ABM: Mac / iPad / iPhone / AppleTV
+	TemplateFamily string // which template file was used (lowercased family)
+	ProfileUUID    string // Apple-returned DEP profile UUID
+	AppliedAt      time.Time
+	LastError      string
+}
+
+// ABMDevice is one device as returned by Apple Business Manager's
+// /v1/orgDevices endpoint.
+type ABMDevice struct {
+	Serial        string
+	DeviceModel   string
+	ProductFamily string // Mac / iPad / iPhone / AppleTV
+	Status        string // ASSIGNED / ...
+	AddedToOrg    time.Time
+}
+
 // --- Asset Management ---
 
 type Asset struct {

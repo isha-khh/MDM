@@ -3,6 +3,7 @@ package config
 import (
 	"log"
 	"os"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -17,6 +18,16 @@ type Config struct {
 	WebhookPath  string
 	WebSocketURL string
 	SMTP         SMTPConfig
+
+	// Apple Business Manager API + DEP auto-assignment
+	ABMKeyPath      string        // PEM path; empty disables ABM
+	ABMClientID     string        // BUSINESSAPI.<UUID>
+	ABMTeamID       string        // defaults to ABMClientID
+	ABMKeyID        string        // KID
+	ABMScope        string        // defaults to "business.api"
+	DEPTemplateDir  string        // dir holding mac.json/ipad.json/iphone.json
+	DEPPollInterval time.Duration // how often to poll ABM
+	DEPAutoAssign   bool          // master switch; must be true to start scheduler
 }
 
 type SMTPConfig struct {
@@ -33,6 +44,13 @@ func Load() *Config {
 	// Load .env file if it exists (won't override existing env vars)
 	if err := godotenv.Load(); err != nil {
 		log.Println("config: no .env file found, using environment variables")
+	}
+
+	pollIntervalRaw := envOr("DEP_POLL_INTERVAL", "5m")
+	pollInterval, err := time.ParseDuration(pollIntervalRaw)
+	if err != nil {
+		log.Printf("config: DEP_POLL_INTERVAL=%q invalid (%v), defaulting to 5m", pollIntervalRaw, err)
+		pollInterval = 5 * time.Minute
 	}
 
 	return &Config{
@@ -53,6 +71,15 @@ func Load() *Config {
 			FromName: envOr("SMTP_FROM_NAME", "MDM 管理平台"),
 			TLS:      envOr("SMTP_TLS", "true") == "true",
 		},
+
+		ABMKeyPath:      envOr("ABM_KEY_PATH", ""),
+		ABMClientID:     envOr("ABM_CLIENT_ID", ""),
+		ABMTeamID:       envOr("ABM_TEAM_ID", ""),
+		ABMKeyID:        envOr("ABM_KEY_ID", ""),
+		ABMScope:        envOr("ABM_SCOPE", "business.api"),
+		DEPTemplateDir:  envOr("DEP_TEMPLATE_DIR", "./dep-profiles"),
+		DEPPollInterval: pollInterval,
+		DEPAutoAssign:   envOr("DEP_AUTO_ASSIGN", "false") == "true",
 	}
 }
 

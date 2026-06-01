@@ -55,3 +55,6 @@ var Migration017SQL string
 
 //go:embed migrations/018_rental_asset_id.up.sql
 var Migration018SQL string
+
+//go:embed migrations/019_dep_assignments.up.sql
+var Migration019SQL string

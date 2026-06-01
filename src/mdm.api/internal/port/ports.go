@@ -40,6 +40,7 @@ type MicroMDMClient interface {
 	ClearQueue(ctx context.Context, udid string) (*domain.CommandResult, error)
 	InspectQueue(ctx context.Context, udid string) (string, error)
 	SyncDEP(ctx context.Context) error
+	DefineDEPProfile(ctx context.Context, template map[string]interface{}, serials []string) (string, error)
 }
 
 // VPPClient calls the Apple VPP API.
@@ -175,4 +176,16 @@ type MailSettingsRepository interface {
 type EventBroker interface {
 	Publish(event *domain.MDMEvent)
 	Subscribe(ctx context.Context) <-chan *domain.MDMEvent
+}
+
+// ABMClient calls the Apple School and Business Manager API.
+type ABMClient interface {
+	ListOrgDevices(ctx context.Context) ([]domain.ABMDevice, error)
+}
+
+// DEPAssignmentRepo persists which serials have had a DEP profile applied.
+type DEPAssignmentRepo interface {
+	Get(ctx context.Context, serial string) (*domain.DEPAssignment, error) // returns nil, nil when absent
+	Upsert(ctx context.Context, a *domain.DEPAssignment) error
+	ListSerials(ctx context.Context) (map[string]bool, error) // set of all known serials, for batch diff
 }

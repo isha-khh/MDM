@@ -19,6 +19,7 @@ import (
 	"golang.org/x/net/http2/h2c"
 
 	"github.com/anthropics/mdm-server/gen/mdm/v1/mdmv1connect"
+	"github.com/anthropics/mdm-server/internal/adapter/abm"
 	"github.com/anthropics/mdm-server/internal/adapter/micromdm"
 	"github.com/anthropics/mdm-server/internal/adapter/postgres"
 	smtpAdapter "github.com/anthropics/mdm-server/internal/adapter/smtp"
@@ -144,6 +145,33 @@ func main() {
 	if cfg.WebSocketURL != "" {
 		relay := service.NewSocketIORelay(cfg.WebSocketURL, cfg.MicroMDMKey, webhookHandler)
 		relay.Start()
+	}
+
+	// DEP auto-assignment scheduler — only starts if explicitly enabled AND
+	// the ABM credentials are present. Master switch DEP_AUTO_ASSIGN defaults
+	// to false so this won't fire on a fresh deploy without operator opt-in.
+	if cfg.DEPAutoAssign {
+		if cfg.ABMKeyPath == "" || cfg.ABMClientID == "" || cfg.ABMKeyID == "" {
+			log.Printf("[dep-scheduler] disabled: DEP_AUTO_ASSIGN=true but ABM_KEY_PATH/CLIENT_ID/KEY_ID missing")
+		} else {
+			abmClient, err := abm.NewClient(abm.Config{
+				KeyPath:  cfg.ABMKeyPath,
+				ClientID: cfg.ABMClientID,
+				TeamID:   cfg.ABMTeamID,
+				KeyID:    cfg.ABMKeyID,
+				Scope:    cfg.ABMScope,
+			})
+			if err != nil {
+				log.Printf("[dep-scheduler] disabled: ABM client init: %v", err)
+			} else {
+				depRepo := postgres.NewDEPAssignmentRepo(pool)
+				scheduler := service.NewDEPScheduler(abmClient, mdmClient, depRepo, cfg.DEPTemplateDir, cfg.DEPPollInterval)
+				scheduler.Start(context.Background())
+				log.Printf("[dep-scheduler] enabled, polling every %s, templates in %s", cfg.DEPPollInterval, cfg.DEPTemplateDir)
+			}
+		}
+	} else {
+		log.Printf("[dep-scheduler] disabled (DEP_AUTO_ASSIGN=false)")
 	}
 
 	// Process pending app commands when device acknowledges
@@ -277,7 +305,7 @@ func main() {
 
 func runMigrations(pool *pgxpool.Pool) {
 	ctx := context.Background()
-	for i, sql := range []string{db.MigrationSQL, db.Migration002SQL, db.Migration003SQL, db.Migration004SQL, db.Migration005SQL, db.Migration006SQL, db.Migration007SQL, db.Migration008SQL, db.Migration009SQL, db.Migration010SQL, db.Migration011SQL, db.Migration012SQL, db.Migration013SQL, db.Migration014SQL, db.Migration015SQL, db.Migration016SQL, db.Migration017SQL, db.Migration018SQL} {
+	for i, sql := range []string{db.MigrationSQL, db.Migration002SQL, db.Migration003SQL, db.Migration004SQL, db.Migration005SQL, db.Migration006SQL, db.Migration007SQL, db.Migration008SQL, db.Migration009SQL, db.Migration010SQL, db.Migration011SQL, db.Migration012SQL, db.Migration013SQL, db.Migration014SQL, db.Migration015SQL, db.Migration016SQL, db.Migration017SQL, db.Migration018SQL, db.Migration019SQL} {
 		if _, err := pool.Exec(ctx, sql); err != nil {
 			log.Printf("migration %d: %v (may already be applied)", i+1, err)
 		} else {
