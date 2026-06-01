@@ -2,6 +2,7 @@ import { useMemo, useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useDialog } from "./DialogProvider";
 import { parsePlist, base64ToUtf8 } from "../lib/plist";
+import { decodeMDMErrorChain, type DecodedError } from "../lib/mdmErrors";
 import {
   Smartphone, HardDrive, Wifi, Shield, Lock, Check, X, Trash2,
   Globe, MapPin, Calendar, Package, FileText, Award, AlertTriangle,
@@ -529,8 +530,8 @@ function GenericDictView({ data, status }: { data: Dict; status?: string }) {
           <tbody>
             {Object.entries(data).map(([key, val]) => (
               <tr key={key} className="hover">
-                <td className="font-mono text-xs font-medium">{key}</td>
-                <td className="text-sm max-w-md truncate">{formatValue(val, key)}</td>
+                <td className="font-mono text-xs font-medium align-top">{key}</td>
+                <td className="text-sm"><ValueCell val={val} keyName={key} /></td>
               </tr>
             ))}
           </tbody>
@@ -538,6 +539,97 @@ function GenericDictView({ data, status }: { data: Dict; status?: string }) {
       </div>
     </div>
   );
+}
+
+// ValueCell renders one value in a key/value table. Primitives are shown
+// inline (truncated if long); arrays/objects render as a click-to-expand
+// disclosure so nested fields like ErrorChain become inspectable.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function ValueCell({ val, keyName }: { val: any; keyName?: string }) {
+  const isArray = Array.isArray(val);
+  const isObject = !isArray && typeof val === "object" && val !== null && !(val instanceof Date);
+
+  if (!isArray && !isObject) {
+    return <span className="max-w-md inline-block truncate align-top">{formatValue(val, keyName)}</span>;
+  }
+
+  // Special case: ErrorChain — decode each entry to a human-readable label
+  // via the mdmErrors lookup, so operators don't have to cross-reference docs.
+  if (isArray && keyName === "ErrorChain") {
+    return <ErrorChainCell raw={val as unknown[]} />;
+  }
+
+  const summary = isArray
+    ? `[${(val as unknown[]).length} items]`
+    : `{${Object.keys(val as object).length} keys}`;
+
+  return (
+    <details className="group">
+      <summary className="cursor-pointer select-none text-primary hover:underline">
+        {summary}
+      </summary>
+      <pre className="mt-1 p-2 text-xs bg-base-200 rounded max-h-64 overflow-auto whitespace-pre-wrap break-words">
+        {safeStringify(val)}
+      </pre>
+    </details>
+  );
+}
+
+// ErrorChainCell formats an MDM ErrorChain into something operators can act on
+// without leaving the page. Each decoded error shows the Chinese label inline
+// and folds away the raw fields (ErrorCode/ErrorDomain/LocalizedDescription)
+// behind a per-entry disclosure.
+function ErrorChainCell({ raw }: { raw: unknown[] }) {
+  const decoded: DecodedError[] = decodeMDMErrorChain(raw);
+  return (
+    <details open>
+      <summary className="cursor-pointer select-none text-error hover:underline">
+        [{decoded.length} error{decoded.length === 1 ? "" : "s"}]
+      </summary>
+      <ul className="mt-1 space-y-1">
+        {decoded.map((e, i) => (
+          <li key={i} className="text-xs border-l-2 border-error/40 pl-2">
+            <div className="font-medium">
+              {e.label}
+              {!e.isKnown && (
+                <span className="ml-1 badge badge-xs badge-warning">未收錄</span>
+              )}
+            </div>
+            {e.hint && (
+              <div className="text-base-content/70">建議：{e.hint}</div>
+            )}
+            <div className="font-mono text-base-content/50 mt-0.5">
+              {e.domain}{e.code != null ? ` / ${e.code}` : ""}
+              {e.localized && e.localized !== e.label && (
+                <> · <span className="italic">{e.localized}</span></>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+// safeStringify handles cyclic refs gracefully (rare in plist data but cheap insurance).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function safeStringify(val: any): string {
+  const seen = new WeakSet();
+  try {
+    return JSON.stringify(
+      val,
+      (_k, v) => {
+        if (typeof v === "object" && v !== null) {
+          if (seen.has(v)) return "[Circular]";
+          seen.add(v);
+        }
+        return v;
+      },
+      2,
+    );
+  } catch {
+    return String(val);
+  }
 }
 
 // --- Helpers ---
