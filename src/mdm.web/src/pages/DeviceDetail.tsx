@@ -14,6 +14,10 @@ import {
 import { ProfilePicker } from "../components/ProfilePicker";
 import { AssetForm } from "../components/AssetForm";
 import apiClient from "../lib/apiClient";
+import {
+  COMMAND_SPECS, type MDMCommandSpec, type Platform,
+  inferPlatform, checkCommand, dialogRequired,
+} from "../lib/mdmCommands";
 
 interface ManagedApp {
   id: string;
@@ -70,30 +74,22 @@ const tabs: TabDef[] = [
 ];
 
 // --- Action command definitions ---
-interface ActionCmd {
-  label: string;
-  method: string;
-  icon: React.ReactNode;
-  danger?: boolean;
-  requiresLostMode?: boolean;
-  roles?: string[]; // allowed roles, empty = all
-}
-
-const actionCommands: ActionCmd[] = [
-  { label: "推播",         method: "sendPush",           icon: <Bell size={14} /> },
-  { label: "鎖定裝置",     method: "lockDevice",         icon: <Lock size={14} /> },
-  { label: "重新啟動",     method: "restartDevice",      icon: <RotateCcw size={14} /> },
-  { label: "關機",         method: "shutdownDevice",     icon: <Power size={14} /> },
-  { label: "清除密碼",     method: "clearPasscode",      icon: <KeyRound size={14} /> },
-  { label: "啟用遺失模式", method: "enableLostMode",     icon: <MapPin size={14} /> },
-  { label: "關閉遺失模式", method: "disableLostMode",    icon: <MapPinOff size={14} /> },
-  { label: "定位",         method: "getDeviceLocation",  icon: <MapPin size={14} />,   requiresLostMode: true },
-  { label: "播放聲音",     method: "playLostModeSound",  icon: <Volume2 size={14} />,  requiresLostMode: true },
-  { label: "安裝 App",     method: "showInstallApp",     icon: <Download size={14} />, roles: ["admin", "operator"] },
-  { label: "更新 App",     method: "showUpdateApp",      icon: <RefreshCcw size={14} /> },
-  { label: "移除 App",     method: "showUninstallApp",   icon: <PackageMinus size={14} />, roles: ["admin", "operator"] },
-  { label: "清除裝置",     method: "eraseDevice",        icon: <Trash2 size={14} />,   danger: true, roles: ["admin"] },
-];
+// Icon mapping (kept in this file because lucide JSX can't live in the spec library).
+const COMMAND_ICONS: Record<string, React.ReactNode> = {
+  sendPush:          <Bell size={14} />,
+  lockDevice:        <Lock size={14} />,
+  restartDevice:     <RotateCcw size={14} />,
+  shutdownDevice:    <Power size={14} />,
+  clearPasscode:     <KeyRound size={14} />,
+  enableLostMode:    <MapPin size={14} />,
+  disableLostMode:   <MapPinOff size={14} />,
+  getDeviceLocation: <MapPin size={14} />,
+  playLostModeSound: <Volume2 size={14} />,
+  showInstallApp:    <Download size={14} />,
+  showUpdateApp:     <RefreshCcw size={14} />,
+  showUninstallApp:  <PackageMinus size={14} />,
+  eraseDevice:       <Trash2 size={14} />,
+};
 
 export function DeviceDetail() {
   const { t } = useTranslation();
@@ -124,6 +120,10 @@ export function DeviceDetail() {
   const [selectedUninstallIds, setSelectedUninstallIds] = useState<string[]>([]);
   const [appLoading, setAppLoading] = useState(false);
   const [showAppUpdate, setShowAppUpdate] = useState(false);
+  // PIN dialogs — Apple requires a 6-digit PIN for macOS DeviceLock and EraseDevice.
+  const [pinDialog, setPinDialog] = useState<null | "lock" | "erase">(null);
+  const [pinValue, setPinValue] = useState("");
+  const [lockMessage, setLockMessage] = useState("");
 
   const baseUrl = import.meta.env.DEV ? "" : window.location.origin;
 
@@ -179,25 +179,31 @@ export function DeviceDetail() {
     setSyncing(null);
   };
 
-  // Execute an action command
-  const executeAction = async (cmd: ActionCmd) => {
+  // Derive platform once per render — used by command spec checks below.
+  const devicePlatform: Platform = device
+    ? inferPlatform(device.model || "")
+    : "unknown";
+
+  // Execute an action command via its spec. The spec decides whether to open
+  // a parameter dialog first or call the backend directly.
+  const executeAction = async (cmd: MDMCommandSpec) => {
     if (!clients || !udid) return;
-    if (cmd.method === "enableLostMode") {
-      setShowLostMode(true);
-      return;
+
+    // Dialog-routed commands: open the right modal and let its handler do the
+    // actual send (so the user can input PIN / message / app selection).
+    if (cmd.dialog && dialogRequired(cmd, devicePlatform)) {
+      switch (cmd.dialog) {
+        case "lost-mode":    setShowLostMode(true); return;
+        case "install-app":  openAppInstall(); return;
+        case "update-app":   openAppUpdate(); return;
+        case "uninstall-app": openAppUninstall(); return;
+        case "lock-pin":     setPinValue(""); setLockMessage(""); setPinDialog("lock"); return;
+        case "erase-pin":    setPinValue(""); setPinDialog("erase"); return;
+      }
     }
-    if (cmd.method === "showInstallApp") {
-      openAppInstall();
-      return;
-    }
-    if (cmd.method === "showUpdateApp") {
-      openAppUpdate();
-      return;
-    }
-    if (cmd.method === "showUninstallApp") {
-      openAppUninstall();
-      return;
-    }
+
+    // Direct-send commands (or platforms where the dialog isn't needed,
+    // e.g. iOS DeviceLock has no PIN requirement).
     if (cmd.danger && !(await dialog.confirm(`確定要執行「${cmd.label}」嗎？此操作無法復原。`))) return;
     setExecuting(cmd.method);
     setActionResult(null);
@@ -209,6 +215,53 @@ export function DeviceDetail() {
     } catch (err) {
       setActionResult(`Error: ${err instanceof Error ? err.message : "Unknown"}`);
     } finally { setExecuting(null); }
+  };
+
+  // Confirm + send a macOS DeviceLock with the 6-digit PIN the user typed.
+  const executePinLock = async () => {
+    if (!clients || !udid) return;
+    if (!/^\d{6}$/.test(pinValue)) return; // form validation prevents this, defensive
+    setPinDialog(null);
+    setExecuting("lockDevice");
+    setActionResult(null);
+    try {
+      const resp = await clients.command.lockDevice({
+        udids: [udid],
+        pin: pinValue,
+        message: lockMessage,
+      });
+      trackCommand("鎖定裝置 (PIN)", [udid], resp.commandUuid);
+      if (resp.rawResponse) setActionResult(resp.rawResponse);
+    } catch (err) {
+      setActionResult(`Error: ${err instanceof Error ? err.message : "Unknown"}`);
+    } finally {
+      setExecuting(null);
+      setPinValue("");
+      setLockMessage("");
+    }
+  };
+
+  // Confirm + send a macOS EraseDevice with the 6-digit PIN.
+  const executePinErase = async () => {
+    if (!clients || !udid) return;
+    if (!/^\d{6}$/.test(pinValue)) return;
+    if (!(await dialog.confirm(`確定要清除這台 Mac 嗎？此操作無法復原。`))) return;
+    setPinDialog(null);
+    setExecuting("eraseDevice");
+    setActionResult(null);
+    try {
+      const resp = await clients.command.eraseDevice({
+        udids: [udid],
+        pin: pinValue,
+      });
+      trackCommand("清除裝置 (PIN)", [udid], resp.commandUuid);
+      if (resp.rawResponse) setActionResult(resp.rawResponse);
+    } catch (err) {
+      setActionResult(`Error: ${err instanceof Error ? err.message : "Unknown"}`);
+    } finally {
+      setExecuting(null);
+      setPinValue("");
+    }
   };
 
   const executeLostMode = async () => {
@@ -538,16 +591,24 @@ export function DeviceDetail() {
         <div className="card-body p-4">
           <h2 className="card-title text-base mb-2">裝置操作</h2>
           <div className="flex flex-wrap gap-2">
-            {actionCommands.filter((cmd) => !cmd.roles || cmd.roles.includes(userRole)).map((cmd) => {
-              const disabled = executing !== null || (cmd.requiresLostMode && !device.is_lost_mode);
+            {COMMAND_SPECS.map((cmd) => {
+              const check = checkCommand(cmd, {
+                platform: devicePlatform,
+                isSupervised: !!device.is_supervised,
+                isLostMode: !!device.is_lost_mode,
+                role: userRole,
+              });
+              // Hide entirely if role doesn't permit (clean toolbar; same behavior as before).
+              if (!check.ok && check.reason === "權限不足") return null;
+              const disabled = !check.ok || executing !== null;
               return (
-                <div key={cmd.method} className={cmd.requiresLostMode && !device.is_lost_mode ? "tooltip" : ""} data-tip={cmd.requiresLostMode ? "需先啟用遺失模式" : ""}>
+                <div key={cmd.method} className={check.reason ? "tooltip" : ""} data-tip={check.reason || ""}>
                   <button
                     onClick={() => executeAction(cmd)}
                     disabled={disabled}
                     className={`btn btn-sm gap-1 ${cmd.danger ? "btn-error" : "btn-outline"}`}
                   >
-                    {executing === cmd.method ? <span className="loading loading-spinner loading-xs"></span> : cmd.icon}
+                    {executing === cmd.method ? <span className="loading loading-spinner loading-xs"></span> : COMMAND_ICONS[cmd.method]}
                     {cmd.label}
                   </button>
                 </div>
@@ -636,6 +697,65 @@ export function DeviceDetail() {
         </div>
         <form method="dialog" className="modal-backdrop">
           <button onClick={() => setShowLostMode(false)}>close</button>
+        </form>
+      </dialog>
+      {/* macOS DeviceLock / EraseDevice PIN dialog — Apple requires a 6-digit
+          PIN for these on macOS (Apple Silicon needs PIN for erase since 11+,
+          and DeviceLock on macOS 10.12+ always requires PIN). */}
+      <dialog className={`modal ${pinDialog !== null ? "modal-open" : ""}`}>
+        <div className="modal-box">
+          <h3 className="font-bold text-lg flex items-center gap-2">
+            {pinDialog === "lock" ? <><Lock size={18} /> 鎖定 Mac</> : <><Trash2 size={18} /> 清除 Mac</>}
+          </h3>
+          <div className="space-y-3 py-4">
+            <div className="alert alert-warning text-sm">
+              {pinDialog === "lock"
+                ? "Mac 收到鎖定後會立即重開機並要求輸入這組 PIN 才能解鎖。請務必記下。"
+                : "清除動作不可復原。Mac 重開機進入回復模式需要輸入這組 PIN。"}
+            </div>
+            <div className="form-control">
+              <label className="label"><span className="label-text font-medium">6 位數 PIN <span className="text-error">*</span></span></label>
+              <input
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]{6}"
+                maxLength={6}
+                value={pinValue}
+                onChange={(e) => setPinValue(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                className="input input-bordered input-sm font-mono text-center text-lg tracking-widest"
+                placeholder="000000"
+                autoFocus
+              />
+              {pinValue.length > 0 && pinValue.length < 6 && (
+                <span className="text-error text-xs mt-1">PIN 必須是 6 位數字</span>
+              )}
+            </div>
+            {pinDialog === "lock" && (
+              <div className="form-control">
+                <label className="label"><span className="label-text font-medium">鎖定畫面訊息</span></label>
+                <input
+                  type="text"
+                  value={lockMessage}
+                  onChange={(e) => setLockMessage(e.target.value)}
+                  className="input input-bordered input-sm"
+                  placeholder="選填，會顯示在鎖定畫面上"
+                />
+              </div>
+            )}
+          </div>
+          <div className="modal-action">
+            <button className="btn" onClick={() => { setPinDialog(null); setPinValue(""); setLockMessage(""); }}>取消</button>
+            <button
+              className={pinDialog === "erase" ? "btn btn-error" : "btn btn-warning"}
+              disabled={!/^\d{6}$/.test(pinValue)}
+              onClick={pinDialog === "lock" ? executePinLock : executePinErase}
+            >
+              {pinDialog === "lock" ? "鎖定" : "清除裝置"}
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop">
+          <button onClick={() => setPinDialog(null)}>close</button>
         </form>
       </dialog>
       {/* Install App Modal */}
