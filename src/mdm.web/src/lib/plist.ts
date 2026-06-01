@@ -9,6 +9,10 @@ export function parsePlist(xml: string): PlistValue | null {
   try {
     const parser = new DOMParser();
     const doc = parser.parseFromString(xml, "text/xml");
+    // DOMParser reports XML parse failures by injecting a <parsererror>
+    // element rather than throwing. Treat that as untrusted input we should
+    // refuse — defence-in-depth even though downstream only reads textContent.
+    if (doc.querySelector("parsererror")) return null;
     const plist = doc.querySelector("plist");
     if (!plist || !plist.firstElementChild) return null;
     return parseNode(plist.firstElementChild);

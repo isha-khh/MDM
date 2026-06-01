@@ -1,5 +1,10 @@
-requests~=2.31.0
-python-socketio~=5.3.0
-python-dotenv~=0.21.0
+# Versions bumped 2026-06-01 to clear Dependabot Moderate alerts:
+#   requests 2.31.0  → 2.32.4+  (Session verify=False, .netrc leak, temp file reuse)
+#   python-socketio 5.3.0 → 5.11+  (pickle RCE in multi-server deploys)
+#   python-dotenv 0.21.0 → 1.0+  (symlink follow in set_key)
+#   flask 2.2.5 → 2.3.8+  (missing Vary: Cookie header)
+requests~=2.32.4
+python-socketio~=5.11.4
+python-dotenv~=1.0.1
 rich~=13.3.5
-flask~=2.2.5
+flask~=2.3.8

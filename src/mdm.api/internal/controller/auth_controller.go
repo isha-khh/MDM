@@ -25,6 +25,18 @@ func (c *AuthController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/me", c.handleMe)
 }
 
+// isSecureRequest reports whether the request reached us over HTTPS, either
+// directly (r.TLS) or via a reverse proxy that set X-Forwarded-Proto=https.
+// We use this to set Cookie.Secure dynamically so dev (HTTP localhost) keeps
+// working while production (mdm.isha.net behind TLS) gets a properly-protected
+// cookie that browsers refuse to send over plain HTTP.
+func isSecureRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return r.Header.Get("X-Forwarded-Proto") == "https"
+}
+
 // handleLogin godoc
 // @Summary 使用者登入
 // @Tags Auth
@@ -72,6 +84,7 @@ func (c *AuthController) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    access,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   24 * 60 * 60,
 	})
@@ -101,7 +114,7 @@ func (c *AuthController) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (c *AuthController) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: middleware.CookieName, Value: "", Path: "/",
-		HttpOnly: true, MaxAge: -1,
+		HttpOnly: true, Secure: isSecureRequest(r), MaxAge: -1,
 	})
 	writeJSON(w, map[string]bool{"ok": true})
 }

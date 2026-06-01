@@ -474,9 +474,15 @@ function OSUpdatesView({ updates, status }: { updates: any[]; status?: string })
 }
 
 function LocationView({ data, status }: { data: Dict; status?: string }) {
-  const lat = data.Latitude as number;
-  const lng = data.Longitude as number;
-  const mapUrl = `https://www.google.com/maps?q=${lat},${lng}`;
+  // Coerce to number — plist values may arrive as strings; reject anything
+  // non-finite so we never paste attacker-controlled text into a URL attribute.
+  const lat = typeof data.Latitude === "number" ? data.Latitude : Number(data.Latitude);
+  const lng = typeof data.Longitude === "number" ? data.Longitude : Number(data.Longitude);
+  const haveCoords = Number.isFinite(lat) && Number.isFinite(lng);
+  // encodeURIComponent is defence-in-depth even after the numeric check.
+  const mapUrl = haveCoords
+    ? `https://www.google.com/maps?q=${encodeURIComponent(String(lat))},${encodeURIComponent(String(lng))}`
+    : "";
 
   return (
     <div className="space-y-3">
@@ -488,7 +494,9 @@ function LocationView({ data, status }: { data: Dict; status?: string }) {
         <div className="flex items-start gap-4">
           <Globe size={24} className="text-primary mt-1" />
           <div>
-            <div className="font-mono text-lg">{lat?.toFixed(6)}, {lng?.toFixed(6)}</div>
+            <div className="font-mono text-lg">
+              {haveCoords ? `${lat.toFixed(6)}, ${lng.toFixed(6)}` : "—"}
+            </div>
             {data.HorizontalAccuracy && (
               <div className="text-sm text-base-content/60">
                 精度: {data.HorizontalAccuracy}m
@@ -499,9 +507,11 @@ function LocationView({ data, status }: { data: Dict; status?: string }) {
                 <Calendar size={12} /> {new Date(data.Timestamp as string).toLocaleString()}
               </div>
             )}
-            <a href={mapUrl} target="_blank" rel="noopener noreferrer" className="btn btn-primary btn-sm mt-2 gap-1">
-              <MapPin size={14} /> Google Maps
-            </a>
+            {haveCoords && (
+              <a href={mapUrl} target="_blank" rel="noopener noreferrer" className="btn btn-primary btn-sm mt-2 gap-1">
+                <MapPin size={14} /> Google Maps
+              </a>
+            )}
           </div>
         </div>
       </div>

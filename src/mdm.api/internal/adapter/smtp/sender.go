@@ -8,10 +8,20 @@ import (
 	"log"
 	"net"
 	"net/smtp"
+	"strings"
 	"sync"
 
 	"github.com/anthropics/mdm-server/internal/config"
 )
+
+// sanitizeHeader strips CR, LF, and NUL from a header value. Without this an
+// attacker who controls `to` or `subject` can inject extra SMTP headers
+// (Bcc, Reply-To, even a full second body) by embedding "\r\nBcc: ..." in
+// their input — a textbook SMTP header injection.
+func sanitizeHeader(v string) string {
+	r := strings.NewReplacer("\r", "", "\n", "", "\x00", "")
+	return r.Replace(v)
+}
 
 // Sender implements port.EmailSender via SMTP. It holds a mutable config so
 // the settings controller can hot-reload credentials without a restart.
@@ -78,14 +88,24 @@ func SendWith(cfg config.SMTPConfig, to, subject, htmlBody string) error {
 func sendWith(cfg config.SMTPConfig, to, subject, htmlBody string) error {
 	addr := net.JoinHostPort(cfg.Host, cfg.Port)
 
-	fromHeader := cfg.From
-	if cfg.FromName != "" {
-		fromHeader = fmt.Sprintf("%s <%s>", cfg.FromName, cfg.From)
+	// Sanitize every value that ends up on a header line to block CRLF
+	// injection. The body itself is the only place CRLF is allowed.
+	cleanTo := sanitizeHeader(to)
+	cleanSubject := sanitizeHeader(subject)
+	cleanFrom := sanitizeHeader(cfg.From)
+	cleanFromName := sanitizeHeader(cfg.FromName)
+	if cleanTo == "" || cleanFrom == "" {
+		return errors.New("smtp: to/from required (became empty after sanitization)")
+	}
+
+	fromHeader := cleanFrom
+	if cleanFromName != "" {
+		fromHeader = fmt.Sprintf("%s <%s>", cleanFromName, cleanFrom)
 	}
 
 	msg := "From: " + fromHeader + "\r\n" +
-		"To: " + to + "\r\n" +
-		"Subject: " + subject + "\r\n" +
+		"To: " + cleanTo + "\r\n" +
+		"Subject: " + cleanSubject + "\r\n" +
 		"MIME-Version: 1.0\r\n" +
 		"Content-Type: text/html; charset=\"UTF-8\"\r\n" +
 		"\r\n" +
@@ -95,15 +115,15 @@ func sendWith(cfg config.SMTPConfig, to, subject, htmlBody string) error {
 
 	var err error
 	if cfg.TLS {
-		err = sendWithTLS(addr, auth, cfg.Host, cfg.From, to, []byte(msg))
+		err = sendWithTLS(addr, auth, cfg.Host, cleanFrom, cleanTo, []byte(msg))
 	} else {
-		err = smtp.SendMail(addr, auth, cfg.From, []string{to}, []byte(msg))
+		err = smtp.SendMail(addr, auth, cleanFrom, []string{cleanTo}, []byte(msg))
 	}
 	if err != nil {
-		log.Printf("[smtp] send to %s failed: %v", to, err)
+		log.Printf("[smtp] send to %s failed: %v", cleanTo, err)
 		return err
 	}
-	log.Printf("[smtp] sent to %s: %s", to, subject)
+	log.Printf("[smtp] sent to %s: %s", cleanTo, cleanSubject)
 	return nil
 }
 
