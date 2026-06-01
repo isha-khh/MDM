@@ -58,3 +58,6 @@ var Migration018SQL string
 
 //go:embed migrations/019_dep_assignments.up.sql
 var Migration019SQL string
+
+//go:embed migrations/020_app_platforms.up.sql
+var Migration020SQL string

@@ -47,6 +47,7 @@ type MicroMDMClient interface {
 type VPPClient interface {
 	AssignLicense(ctx context.Context, adamID string, serialNumbers []string) (string, error)
 	RevokeLicense(ctx context.Context, adamID string, serialNumbers []string) (string, error)
+	GetVPPAssets(ctx context.Context) ([]domain.VPPAsset, error)
 }
 
 // AssetRepository persists assets.
@@ -127,6 +128,7 @@ type AppRepository interface {
 	SyncDeviceApp(ctx context.Context, deviceUdid, appID string) (bool, error)
 	ListAppsNeedingIcons(ctx context.Context) ([]struct{ ID, BundleID, ItunesID string }, error)
 	UpdateIcon(ctx context.Context, id, iconURL, itunesID string) error
+	SetPurchasedQtyByItunesID(ctx context.Context, itunesStoreID string, qty int) (int, error)
 }
 
 // CategoryRepository persists categories.

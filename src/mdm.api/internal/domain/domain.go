@@ -79,6 +79,17 @@ type ABMDevice struct {
 	AddedToOrg    time.Time
 }
 
+// VPPAsset mirrors one entry from Apple's getVPPAssetsSrv response — the unit
+// of VPP licensing. AdamID is the iTunes Store track id; the qty fields tell
+// us how many licenses are purchased / in use, used to sync purchased_qty.
+type VPPAsset struct {
+	AdamID          string
+	ProductTypeName string // "Software" / "Publication"
+	TotalCount      int    // total licenses purchased in ABM
+	AssignedCount   int    // currently assigned to devices/users
+	RetiredCount    int    // revoked but not yet re-usable
+}
+
 // --- Asset Management ---
 
 type Asset struct {
@@ -211,8 +222,12 @@ type ManagedApp struct {
 	PurchasedQty  int
 	Notes         string
 	IconURL       string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// SupportedPlatforms is a comma-separated list of lower-case platform
+	// tokens (ios,ipados,macos,tvos,watchos). Used to filter App Store
+	// search results and to gate "install" actions to compatible devices.
+	SupportedPlatforms string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 	// Computed
 	InstalledCount int
 }

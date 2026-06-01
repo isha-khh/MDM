@@ -18,8 +18,29 @@ interface ManagedApp {
   notes: string;
   installed_count: number;
   icon_url: string;
+  supported_platforms: string; // CSV: "ios,ipados,macos,tvos,watchos"
   created_at: string;
   updated_at: string;
+}
+
+// Platforms users can tag an app with. Order = display order in chips.
+const PLATFORM_OPTIONS = [
+  { key: "ios",     label: "iOS" },
+  { key: "ipados",  label: "iPadOS" },
+  { key: "macos",   label: "macOS" },
+  { key: "tvos",    label: "tvOS" },
+  { key: "watchos", label: "watchOS" },
+] as const;
+
+// Map selected platforms → Apple iTunes Search entity. The Search API takes ONE
+// entity per call, so we pick the most specific match. iOS + iPadOS share
+// "software"; watchOS apps come bundled with iOS in Search too.
+function entityForPlatforms(platforms: string[]): string {
+  const set = new Set(platforms);
+  if (set.has("macos") && !set.has("ios") && !set.has("ipados")) return "macSoftware";
+  if (set.has("tvos") && !set.has("ios") && !set.has("ipados")) return "tvSoftware";
+  if (set.has("ipados") && !set.has("ios") && !set.has("macos")) return "iPadSoftware";
+  return "software"; // iOS / mixed / default
 }
 
 const emptyForm = {
@@ -31,6 +52,7 @@ const emptyForm = {
   purchased_qty: 0,
   notes: "",
   icon_url: "",
+  supported_platforms: "ios,ipados",
 };
 
 export function Apps() {
@@ -64,11 +86,11 @@ export function Apps() {
   const [searching, setSearching] = useState(false);
   const searchTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const doSearch = useCallback(async (term: string) => {
+  const doSearch = useCallback(async (term: string, entity: string) => {
     if (!term || term.length < 2) { setSearchResults([]); return; }
     setSearching(true);
     try {
-      const { data } = await apiClient.get("/api/itunes-search", { params: { term, limit: "8" } });
+      const { data } = await apiClient.get("/api/itunes-search", { params: { term, limit: "8", entity } });
       setSearchResults(data.results || []);
     } catch { setSearchResults([]); }
     finally { setSearching(false); }
@@ -77,7 +99,18 @@ export function Apps() {
   const handleSearchInput = (val: string) => {
     setSearchTerm(val);
     if (searchTimer.current) clearTimeout(searchTimer.current);
-    searchTimer.current = setTimeout(() => doSearch(val), 400);
+    const entity = entityForPlatforms(form.supported_platforms.split(",").filter(Boolean));
+    searchTimer.current = setTimeout(() => doSearch(val, entity), 400);
+  };
+
+  // Toggle one platform in the form's supported_platforms CSV.
+  const togglePlatform = (key: string) => {
+    const set = new Set(form.supported_platforms.split(",").filter(Boolean));
+    if (set.has(key)) set.delete(key);
+    else set.add(key);
+    // Re-emit in canonical order so the string is stable.
+    const ordered = PLATFORM_OPTIONS.map((p) => p.key).filter((k) => set.has(k));
+    setForm({ ...form, supported_platforms: ordered.join(",") });
   };
 
   const selectSearchResult = (r: SearchResult) => {
@@ -170,6 +203,7 @@ export function Apps() {
       purchased_qty: app.purchased_qty,
       notes: app.notes,
       icon_url: app.icon_url,
+      supported_platforms: app.supported_platforms || "ios,ipados",
     });
     setShowModal(true);
   };
@@ -216,6 +250,47 @@ export function Apps() {
     }
   };
 
+  // Pull purchased_qty from Apple VPP for every managed app whose
+  // itunes_store_id matches an asset in our VPP account. New assets that
+  // aren't catalogued yet are returned for the admin to review.
+  const [syncingVPP, setSyncingVPP] = useState(false);
+  const handleSyncVPP = async () => {
+    setSyncingVPP(true);
+    try {
+      const { data } = await apiClient.post("/api/managed-apps/sync-vpp");
+      const unmatched: { adam_id: string; total_count: number; product_type: string }[] = data.unmatched || [];
+      const lines: string[] = [
+        `共 ${data.total_assets} 筆 VPP 資產`,
+        `已更新採購數量：${data.updated}`,
+      ];
+      if (unmatched.length > 0) {
+        const sample = unmatched.slice(0, 5).map((u) => `${u.adam_id} (${u.total_count} 套)`).join("、");
+        lines.push(`未登錄在管理清單：${unmatched.length} 筆${unmatched.length > 5 ? `，前 5 筆：${sample}` : `：${sample}`}`);
+      }
+      await dialog.success(lines.join("\n"));
+      loadApps();
+    } catch (err) {
+      // Surface the real backend error so admins can act on it (token expired,
+      // not configured, endpoint missing, etc.) instead of a generic message.
+      console.error("Sync VPP:", err);
+      let detail = "";
+      if (err && typeof err === "object" && "response" in err) {
+        const resp = (err as { response?: { status?: number; data?: { error?: string } } }).response;
+        if (resp) {
+          detail = `HTTP ${resp.status ?? "?"}`;
+          if (resp.data?.error) detail += ` — ${resp.data.error}`;
+        }
+      } else if (err instanceof Error) {
+        detail = err.message;
+      }
+      await dialog.error(detail
+        ? `VPP 同步失敗\n${detail}`
+        : "VPP 同步失敗（沒收到後端錯誤訊息，請看 console / docker log）");
+    } finally {
+      setSyncingVPP(false);
+    }
+  };
+
   const canEdit = userRole === "admin" || userRole === "operator";
 
   return (
@@ -226,6 +301,12 @@ export function Apps() {
           <p className="text-sm text-base-content/60">登記可安裝的 App，管理採購數量與安裝狀態</p>
         </div>
         <div className="flex gap-2">
+          {canEdit && (
+            <button onClick={handleSyncVPP} disabled={syncingVPP} className="btn btn-outline gap-1" title="從 Apple VPP 拉回授權數量">
+              <RefreshCw size={16} className={syncingVPP ? "animate-spin" : ""} />
+              {syncingVPP ? "同步中..." : "同步 VPP 數量"}
+            </button>
+          )}
           <button onClick={handleSyncDeviceApps} disabled={syncing} className="btn btn-outline gap-1">
             <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
             {syncing ? "同步中..." : "同步已安裝"}
@@ -286,9 +367,17 @@ export function Apps() {
                         </td>
                         <td className="font-mono text-xs">{app.bundle_id}</td>
                         <td>
-                          <span className={`badge badge-sm ${app.app_type === "vpp" ? "badge-primary" : "badge-secondary"}`}>
-                            {app.app_type === "vpp" ? "VPP" : "企業"}
-                          </span>
+                          <div className="flex flex-wrap gap-1 items-center">
+                            <span className={`badge badge-sm ${app.app_type === "vpp" ? "badge-primary" : "badge-secondary"}`}>
+                              {app.app_type === "vpp" ? "VPP" : "企業"}
+                            </span>
+                            {(app.supported_platforms || "").split(",").filter(Boolean).map((p) => {
+                              const opt = PLATFORM_OPTIONS.find((o) => o.key === p);
+                              return opt ? (
+                                <span key={p} className="badge badge-sm badge-outline">{opt.label}</span>
+                              ) : null;
+                            })}
+                          </div>
                         </td>
                         <td className="text-xs max-w-48 truncate">
                           {app.app_type === "vpp" ? app.itunes_store_id : app.manifest_url}
@@ -346,6 +435,33 @@ export function Apps() {
                   <Building2 size={14} /> 企業 App
                 </label>
               </div>
+            </div>
+
+            {/* Platform selector — affects iTunes search results AND determines
+                which devices this app can later be installed on. */}
+            <div className="form-control">
+              <label className="label">
+                <span className="label-text font-medium">適用平台</span>
+                <span className="label-text-alt opacity-60">影響搜尋範圍與可安裝裝置</span>
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {PLATFORM_OPTIONS.map((p) => {
+                  const active = form.supported_platforms.split(",").includes(p.key);
+                  return (
+                    <button
+                      type="button"
+                      key={p.key}
+                      onClick={() => togglePlatform(p.key)}
+                      className={`btn btn-xs ${active ? "btn-primary" : "btn-outline"}`}
+                    >
+                      {p.label}
+                    </button>
+                  );
+                })}
+              </div>
+              {!form.supported_platforms && (
+                <span className="text-error text-xs mt-1">至少選一個平台</span>
+              )}
             </div>
 
             {/* VPP: App Store search + selected preview */}
@@ -448,7 +564,7 @@ export function Apps() {
           </div>
           <div className="modal-action">
             <button className="btn" onClick={() => setShowModal(false)}>取消</button>
-            <button className="btn btn-primary gap-1" disabled={!form.name || saving} onClick={handleSave}>
+            <button className="btn btn-primary gap-1" disabled={!form.name || !form.supported_platforms || saving} onClick={handleSave}>
               {saving ? <span className="loading loading-spinner loading-xs"></span> : <Save size={14} />}
               {editingId ? "儲存" : "新增"}
             </button>

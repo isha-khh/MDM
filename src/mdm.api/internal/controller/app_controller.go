@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,75 @@ func (c *AppController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/sync-device-apps", c.handleSyncDeviceApps)
 	mux.HandleFunc("/api/itunes-lookup", c.handleItunesLookup)
 	mux.HandleFunc("/api/itunes-search", c.handleItunesSearch)
+	mux.HandleFunc("/api/managed-apps/sync-vpp", c.handleSyncVPPAssets)
+}
+
+// handleSyncVPPAssets godoc
+// @Summary 從 Apple VPP 拉回授權數量並更新 managed_apps.purchased_qty
+// @Tags App
+// @Produce json
+// @Security BearerAuth
+// @Success 200 {object} map[string]interface{} "{total_assets, updated, unmatched: [...]}"
+// @Failure 502 {object} swagError "VPP API 失敗"
+// @Router /api/managed-apps/sync-vpp [post]
+func (c *AppController) handleSyncVPPAssets(w http.ResponseWriter, r *http.Request) {
+	if _, err := c.auth.RequireModule(r, "mdm", "operator"); err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if c.vppClient == nil {
+		writeError(w, http.StatusFailedDependency, "VPP not configured")
+		return
+	}
+
+	assets, err := c.vppClient.GetVPPAssets(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	updated := 0
+	unmatched := []map[string]interface{}{}
+	for _, a := range assets {
+		n, err := c.appRepo.SetPurchasedQtyByItunesID(r.Context(), a.AdamID, a.TotalCount)
+		if err != nil {
+			log.Printf("[vpp-sync] update adam=%s: %v", a.AdamID, err)
+			continue
+		}
+		if n == 0 {
+			// VPP asset Apple shows us but we haven't catalogued — surface to UI
+			// so the admin can decide whether to add it as a managed_app.
+			unmatched = append(unmatched, map[string]interface{}{
+				"adam_id":         a.AdamID,
+				"total_count":     a.TotalCount,
+				"assigned_count":  a.AssignedCount,
+				"product_type":    a.ProductTypeName,
+			})
+		} else {
+			updated += n
+		}
+	}
+
+	// Audit
+	username, _ := r.Context().Value(middleware.CtxUsername).(string)
+	userID, _ := r.Context().Value(middleware.CtxUserID).(string)
+	_ = c.auditRepo.Create(r.Context(), &domain.AuditLog{
+		UserID: userID, Username: username,
+		Action: "sync_vpp_assets",
+		Detail: fmt.Sprintf("assets=%d updated=%d unmatched=%d", len(assets), updated, len(unmatched)),
+		Module: "mdm",
+	})
+
+	writeJSON(w, map[string]interface{}{
+		"total_assets": len(assets),
+		"updated":      updated,
+		"unmatched":    unmatched,
+	})
+	log.Printf("[vpp-sync] assets=%d updated=%d unmatched=%d", len(assets), updated, len(unmatched))
 }
 
 // handleManagedApps godoc
@@ -80,20 +150,22 @@ func (c *AppController) handleManagedApps(w http.ResponseWriter, r *http.Request
 				"notes": a.Notes, "created_at": a.CreatedAt.Format(time.RFC3339),
 				"updated_at": a.UpdatedAt.Format(time.RFC3339),
 				"installed_count": a.InstalledCount, "icon_url": a.IconURL,
+				"supported_platforms": a.SupportedPlatforms,
 			})
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{"apps": rows})
 
 	case http.MethodPost:
 		var body struct {
-			Name          string `json:"name"`
-			BundleID      string `json:"bundle_id"`
-			AppType       string `json:"app_type"`
-			ItunesStoreID string `json:"itunes_store_id"`
-			ManifestURL   string `json:"manifest_url"`
-			PurchasedQty  int    `json:"purchased_qty"`
-			Notes         string `json:"notes"`
-			IconURL       string `json:"icon_url"`
+			Name               string `json:"name"`
+			BundleID           string `json:"bundle_id"`
+			AppType            string `json:"app_type"`
+			ItunesStoreID      string `json:"itunes_store_id"`
+			ManifestURL        string `json:"manifest_url"`
+			PurchasedQty       int    `json:"purchased_qty"`
+			Notes              string `json:"notes"`
+			IconURL            string `json:"icon_url"`
+			SupportedPlatforms string `json:"supported_platforms"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 			writeError(w, http.StatusBadRequest, "name is required")
@@ -106,6 +178,7 @@ func (c *AppController) handleManagedApps(w http.ResponseWriter, r *http.Request
 			Name: body.Name, BundleID: body.BundleID, AppType: body.AppType,
 			ItunesStoreID: body.ItunesStoreID, ManifestURL: body.ManifestURL,
 			PurchasedQty: body.PurchasedQty, Notes: body.Notes, IconURL: body.IconURL,
+			SupportedPlatforms: body.SupportedPlatforms,
 		}
 		id, err := c.appRepo.CreateManagedApp(r.Context(), app)
 		if err != nil {
@@ -537,6 +610,7 @@ func (c *AppController) handleItunesLookup(w http.ResponseWriter, r *http.Reques
 // @Security BearerAuth
 // @Param term query string true "搜尋關鍵字"
 // @Param limit query int false "結果數量上限" default(10)
+// @Param entity query string false "Apple entity (software / iPadSoftware / macSoftware / tvSoftware). Default: software"
 // @Success 200 {object} map[string]interface{}
 // @Router /api/itunes-search [get]
 func (c *AppController) handleItunesSearch(w http.ResponseWriter, r *http.Request) {
@@ -553,7 +627,16 @@ func (c *AppController) handleItunesSearch(w http.ResponseWriter, r *http.Reques
 	if limit == "" {
 		limit = "10"
 	}
-	searchURL := fmt.Sprintf("https://itunes.apple.com/search?term=%s&country=tw&entity=software&limit=%s", term, limit)
+	// Allowlist the entity value so we don't blindly forward arbitrary URL fragments to Apple.
+	entity := r.URL.Query().Get("entity")
+	switch entity {
+	case "software", "iPadSoftware", "macSoftware", "tvSoftware":
+		// ok
+	default:
+		entity = "software" // default to iOS/iPadOS universal apps
+	}
+	searchURL := fmt.Sprintf("https://itunes.apple.com/search?term=%s&country=tw&entity=%s&limit=%s",
+		url.QueryEscape(term), entity, limit)
 	resp, err := http.Get(searchURL)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
