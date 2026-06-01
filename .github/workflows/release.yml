@@ -8,8 +8,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_API: ghcr.io/foylaou/mdm-api
-  IMAGE_WEB: ghcr.io/foylaou/mdm-web
+  IMAGE_API: ghcr.io/isha-khh/mdm-api
+  IMAGE_WEB: ghcr.io/isha-khh/mdm-web
 
 jobs:
   build-api:
