@@ -1,7 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AgGridProvider } from "ag-grid-react";
 import { AllEnterpriseModule, IntegratedChartsModule } from "ag-grid-enterprise";
-import { AgChartsEnterpriseModule } from "ag-charts-enterprise";
+
 import { useAuthStore } from "./stores/authStore";
 import { Layout } from "./components/Layout";
 import { ModuleGuard } from "./components/ModuleGuard";
@@ -32,6 +32,7 @@ function DeviceRedirect() {
   return <Navigate to={`/mdm/devices/${udid}`} replace />;
 }
 import apiClient from "./lib/apiClient";
+import {AgChartsEnterpriseModule} from "ag-charts-enterprise";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuthStore();

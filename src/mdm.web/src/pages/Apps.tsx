@@ -258,13 +258,21 @@ export function Apps() {
     setSyncingVPP(true);
     try {
       const { data } = await apiClient.post("/api/managed-apps/sync-vpp");
-      const unmatched: { adam_id: string; total_count: number; product_type: string }[] = data.unmatched || [];
+      const unmatched: {
+        adam_id: string;
+        total_count: number;
+        product_type: string;
+        name?: string;
+        bundle_id?: string;
+      }[] = data.unmatched || [];
       const lines: string[] = [
         `共 ${data.total_assets} 筆 VPP 資產`,
         `已更新採購數量：${data.updated}`,
       ];
       if (unmatched.length > 0) {
-        const sample = unmatched.slice(0, 5).map((u) => `${u.adam_id} (${u.total_count} 套)`).join("、");
+        const label = (u: typeof unmatched[number]) =>
+          u.name ? `${u.name} (${u.total_count} 套)` : `${u.adam_id} (${u.total_count} 套)`;
+        const sample = unmatched.slice(0, 5).map(label).join("、");
         lines.push(`未登錄在管理清單：${unmatched.length} 筆${unmatched.length > 5 ? `，前 5 筆：${sample}` : `：${sample}`}`);
       }
       await dialog.success(lines.join("\n"));

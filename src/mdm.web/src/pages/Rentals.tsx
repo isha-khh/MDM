@@ -584,6 +584,10 @@ export function Rentals() {
           masterDetail
           isRowMaster={(data) => data.rentals.length > 1}
           detailCellRendererParams={detailCellRendererParams}
+          // AG Grid defaults the detail row slot to 300px (≈7 rows × 36px),
+          // which clipped rentals with >7 devices. Letting the slot auto-fit
+          // makes >10 devices visible without scrolling inside the detail.
+          detailRowAutoHeight
           getRowClass={(p) => p.data?.is_archived ? "opacity-50" : ""}
         />
       </div>

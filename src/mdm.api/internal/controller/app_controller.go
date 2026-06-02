@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -42,6 +43,62 @@ func (c *AppController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/itunes-lookup", c.handleItunesLookup)
 	mux.HandleFunc("/api/itunes-search", c.handleItunesSearch)
 	mux.HandleFunc("/api/managed-apps/sync-vpp", c.handleSyncVPPAssets)
+}
+
+type itunesInfo struct {
+	Name     string
+	BundleID string
+	IconURL  string
+}
+
+// lookupItunesNames does a batch iTunes lookup for the given adam IDs and
+// returns a map id → metadata. Apple's lookup endpoint accepts comma-separated
+// ids in a single request, so this is one HTTP call regardless of count.
+// Returns nil on any error (best-effort enrichment).
+func lookupItunesNames(ctx context.Context, ids []string) map[string]itunesInfo {
+	if len(ids) == 0 {
+		return nil
+	}
+	u := "https://itunes.apple.com/lookup?country=tw&id=" + strings.Join(ids, ",")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil
+	}
+	client := &http.Client{Timeout: 12 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil
+	}
+	var r struct {
+		Results []struct {
+			TrackID       int    `json:"trackId"`
+			TrackName     string `json:"trackName"`
+			BundleID      string `json:"bundleId"`
+			ArtworkUrl512 string `json:"artworkUrl512"`
+			ArtworkUrl100 string `json:"artworkUrl100"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil
+	}
+	out := make(map[string]itunesInfo, len(r.Results))
+	for _, item := range r.Results {
+		icon := item.ArtworkUrl512
+		if icon == "" {
+			icon = item.ArtworkUrl100
+		}
+		out[strconv.Itoa(item.TrackID)] = itunesInfo{
+			Name:     item.TrackName,
+			BundleID: item.BundleID,
+			IconURL:  icon,
+		}
+	}
+	return out
 }
 
 // handleSyncVPPAssets godoc
@@ -91,6 +148,28 @@ func (c *AppController) handleSyncVPPAssets(w http.ResponseWriter, r *http.Reque
 			})
 		} else {
 			updated += n
+		}
+	}
+
+	// Enrich unmatched entries with human-readable names from iTunes lookup.
+	// Best-effort — if Apple doesn't recognise an ID or the call fails, we
+	// leave the bare adam_id and let the UI fall back to showing the number.
+	if len(unmatched) > 0 {
+		ids := make([]string, 0, len(unmatched))
+		for _, u := range unmatched {
+			if s, ok := u["adam_id"].(string); ok && s != "" {
+				ids = append(ids, s)
+			}
+		}
+		names := lookupItunesNames(r.Context(), ids)
+		for _, u := range unmatched {
+			if id, _ := u["adam_id"].(string); id != "" {
+				if info, ok := names[id]; ok {
+					u["name"] = info.Name
+					u["bundle_id"] = info.BundleID
+					u["icon_url"] = info.IconURL
+				}
+			}
 		}
 	}
 

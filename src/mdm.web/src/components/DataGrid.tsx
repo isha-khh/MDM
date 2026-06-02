@@ -3,85 +3,12 @@ import { useTranslation } from "react-i18next";
 import { AgGridReact } from "ag-grid-react";
 import type { AgGridReactProps } from "ag-grid-react";
 import { themeQuartz, colorSchemeDark, colorSchemeLight, type ColDef } from "ag-grid-enterprise";
+// Official AG Grid Traditional Chinese pack — replaces the hand-rolled
+// dictionary we maintained before. Covers ~all UI strings including the
+// ones we kept forgetting (column menu, side bar, filter operators, etc.).
+import { AG_GRID_LOCALE_TW } from "@ag-grid-community/locale";
 
-// Minimal locale dictionaries. AG Grid ships richer locale files on NPM
-// (@ag-grid-community/locale) but for our modest string surface we inline
-// just the keys actually rendered.
-const LOCALE_ZH_TW: Record<string, string> = {
-  // generic
-  page: "頁",
-  to: "至",
-  of: "共",
-  next: "下一頁",
-  previous: "上一頁",
-  first: "第一頁",
-  last: "最後一頁",
-  pageLastRowUnknown: "?",
-  pageSizeSelectorLabel: "每頁筆數：",
-  loadingOoo: "載入中…",
-  noRowsToShow: "無資料",
-  // filter
-  searchOoo: "搜尋…",
-  selectAll: "全選",
-  selectAllSearchResults: "全選搜尋結果",
-  addCurrentSelectionToFilter: "加入目前選取",
-  blanks: "(空白)",
-  equals: "等於",
-  notEqual: "不等於",
-  contains: "包含",
-  notContains: "不包含",
-  startsWith: "開頭為",
-  endsWith: "結尾為",
-  greaterThan: "大於",
-  greaterThanOrEqual: "大於或等於",
-  lessThan: "小於",
-  lessThanOrEqual: "小於或等於",
-  inRange: "介於",
-  filterOoo: "篩選…",
-  applyFilter: "套用",
-  resetFilter: "重設",
-  clearFilter: "清除",
-  cancelFilter: "取消",
-  // columns tool panel
-  columns: "欄位",
-  filters: "篩選器",
-  pivots: "樞紐",
-  // menu
-  pinColumn: "釘選欄位",
-  pinLeft: "釘選至左",
-  pinRight: "釘選至右",
-  noPin: "取消釘選",
-  valueAggregation: "彙總",
-  autosizeThiscolumn: "自動調整此欄寬",
-  autosizeAllColumns: "自動調整所有欄寬",
-  groupBy: "依此欄分組",
-  ungroupBy: "取消分組",
-  resetColumns: "重設欄位",
-  expandAll: "全部展開",
-  collapseAll: "全部收合",
-  copy: "複製",
-  copyWithHeaders: "含標題複製",
-  copyWithGroupHeaders: "含群組標題複製",
-  paste: "貼上",
-  export: "匯出",
-  csvExport: "CSV 匯出",
-  excelExport: "Excel 匯出",
-  // row group
-  rowGroupColumnsEmptyMessage: "拖曳欄位到此處進行分組",
-  valueColumnsEmptyMessage: "拖曳欄位到此處進行彙總",
-  pivotColumnsEmptyMessage: "拖曳欄位到此處作為樞紐欄位",
-  // status bar
-  totalAndFilteredRows: "列",
-  totalRows: "合計列數",
-  filteredRows: "已篩選",
-  selectedRows: "已選取",
-  averageValue: "平均",
-  sumValue: "加總",
-  minValue: "最小",
-  maxValue: "最大",
-  countValue: "筆數",
-};
-
+const LOCALE_ZH_TW = AG_GRID_LOCALE_TW;
 const LOCALE_EN: Record<string, string> = {};
 
 interface DataGridProps<T> extends Omit<AgGridReactProps<T>, "theme"> {
@@ -100,6 +27,7 @@ export function DataGrid<T>({
   paginationPageSize = 50,
   paginationPageSizeSelector = [20, 50, 100, 200],
   sideBar,
+  detailCellRendererParams,
   ...rest
 }: DataGridProps<T>) {
   const { i18n } = useTranslation();
@@ -169,6 +97,23 @@ export function DataGrid<T>({
 
   const localeText = i18n.language === "en" ? LOCALE_EN : LOCALE_ZH_TW;
 
+  // Master/detail uses a SEPARATE inner AG Grid instance. It does NOT inherit
+  // localeText from the parent, so we have to inject it into the caller's
+  // detailGridOptions ourselves. Otherwise the inner grid falls back to
+  // English (e.g. "No Rows To Show", column menu strings).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mergedDetailParams = useMemo<any>(() => {
+    if (!detailCellRendererParams) return undefined;
+    const params = detailCellRendererParams as { detailGridOptions?: Record<string, unknown> } & Record<string, unknown>;
+    return {
+      ...params,
+      detailGridOptions: {
+        ...(params.detailGridOptions || {}),
+        localeText: { ...localeText, ...((params.detailGridOptions?.localeText as Record<string, string>) || {}) },
+      },
+    };
+  }, [detailCellRendererParams, localeText]);
+
   return (
     <div style={{ width: "100%", height }}>
       <AgGridReact<T>
@@ -182,6 +127,7 @@ export function DataGrid<T>({
         localeText={localeText}
         animateRows
         suppressCellFocus
+        detailCellRendererParams={mergedDetailParams}
         {...rest}
       />
     </div>
