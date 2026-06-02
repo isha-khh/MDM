@@ -4,7 +4,7 @@ import { useDeviceStore, type DeviceRow } from "../stores/deviceStore";
 import { useTranslation } from "react-i18next";
 import { useDialog } from "../components/DialogProvider";
 import { Link, useNavigate } from "react-router-dom";
-import { Search, RefreshCw, Send, Info, X, Filter, Download } from "lucide-react";
+import { Search, RefreshCw, Send, Info, X, Filter, Download, Cloud, Zap } from "lucide-react";
 import type { ColDef, ICellRendererParams, RowSelectionOptions } from "ag-grid-enterprise";
 import apiClient from "../lib/apiClient";
 import { DataGrid } from "../components/DataGrid";
@@ -25,7 +25,8 @@ interface UserOption { id: string; username: string; display_name: string; }
 export function Devices() {
   const { t } = useTranslation();
   const dialog = useDialog();
-  const { clients } = useAuthStore();
+  const { clients, user } = useAuthStore();
+  const isAdmin = user?.role === "admin";
   const {
     devices, total, loading, filters,
     setFilter, clearFilters, loadDevices,
@@ -34,6 +35,8 @@ export function Devices() {
   const navigate = useNavigate();
   const [syncing, setSyncing] = useState(false);
   const [syncingInfo, setSyncingInfo] = useState(false);
+  const [syncingDEP, setSyncingDEP] = useState(false);
+  const [applyingDEP, setApplyingDEP] = useState(false);
   const [categories, setCategories] = useState<CategoryOption[]>([]);
   const [users, setUsers] = useState<UserOption[]>([]);
 
@@ -66,6 +69,45 @@ export function Devices() {
     } catch (err) {
       await dialog.error("Sync failed: " + (err instanceof Error ? err.message : ""));
     } finally { setSyncingInfo(false); }
+  };
+
+  // Trigger MicroMDM's DEP sync (pulls fresh assignments from Apple). Useful
+  // when an admin just registered a new Mac in ABM and doesn't want to wait
+  // for the next scheduled sync.
+  const handleSyncDEP = async () => {
+    if (!clients) return;
+    setSyncingDEP(true);
+    try {
+      await clients.device.syncDEPDevices({});
+      await dialog.success("已觸發 DEP 同步，MicroMDM 正在跟 Apple 拉資料，請稍候幾秒再按「同步」更新清單。");
+    } catch (err) {
+      await dialog.error("DEP 同步失敗：" + (err instanceof Error ? err.message : ""));
+    } finally {
+      setSyncingDEP(false);
+    }
+  };
+
+  // Run the DEP profile auto-assigner one cycle right now. Equivalent to
+  // waiting for the next scheduler tick but immediate. Server returns 503
+  // if DEP_AUTO_ASSIGN=false (then there's nothing to trigger).
+  const handleApplyDEP = async () => {
+    setApplyingDEP(true);
+    try {
+      await apiClient.post("/api/dep/apply-now");
+      await dialog.success("DEP 套用已執行，請看伺服器 log 取得每台裝置的明細");
+    } catch (err: unknown) {
+      let detail = "";
+      if (err && typeof err === "object" && "response" in err) {
+        const resp = (err as { response?: { status?: number; data?: { error?: string } } }).response;
+        if (resp?.data?.error) detail = resp.data.error;
+        else if (resp?.status) detail = `HTTP ${resp.status}`;
+      } else if (err instanceof Error) {
+        detail = err.message;
+      }
+      await dialog.error("立即套用失敗：" + (detail || "(未知)"));
+    } finally {
+      setApplyingDEP(false);
+    }
   };
 
   // Build category options with indentation
@@ -153,6 +195,22 @@ export function Devices() {
               className="grow w-32"
             />
           </label>
+          {isAdmin && (
+            <>
+              <div className="tooltip tooltip-bottom" data-tip="觸發 MicroMDM 跟 Apple ABM 拉新指派。新加 Mac 不想等排程時用">
+                <button onClick={handleSyncDEP} disabled={syncingDEP} className="btn btn-warning btn-sm gap-1">
+                  {syncingDEP ? <span className="loading loading-spinner loading-xs"></span> : <Cloud size={14} />}
+                  從 ABM 同步 DEP
+                </button>
+              </div>
+              <div className="tooltip tooltip-bottom" data-tip="立即跑一次排程：依 productFamily 把新機自動套上對應 DEP profile（不用等 5 分鐘）">
+                <button onClick={handleApplyDEP} disabled={applyingDEP} className="btn btn-warning btn-sm gap-1">
+                  {applyingDEP ? <span className="loading loading-spinner loading-xs"></span> : <Zap size={14} />}
+                  立即套用 DEP profile
+                </button>
+              </div>
+            </>
+          )}
           <button onClick={handleSync} disabled={syncing} className="btn btn-success btn-sm gap-1">
             {syncing ? <span className="loading loading-spinner loading-xs"></span> : <RefreshCw size={14} />}
             {t("devices.sync")}

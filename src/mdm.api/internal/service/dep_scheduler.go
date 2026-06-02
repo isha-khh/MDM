@@ -76,6 +76,12 @@ func (s *DEPScheduler) loop(ctx context.Context) {
 
 // RunOnce performs one poll cycle. Exposed for unit tests and manual triggers.
 func (s *DEPScheduler) RunOnce(ctx context.Context) {
+	// Defensive against typed-nil interface call. The HTTP layer's nil check
+	// is the primary gate, but this catches misconfiguration paths.
+	if s == nil {
+		log.Println("[dep-scheduler] RunOnce called on nil scheduler — ignored")
+		return
+	}
 	devices, err := s.abm.ListOrgDevices(ctx)
 	if err != nil {
 		log.Printf("[dep-scheduler] list ABM devices: %v", err)

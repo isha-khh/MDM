@@ -150,6 +150,9 @@ func main() {
 	// DEP auto-assignment scheduler — only starts if explicitly enabled AND
 	// the ABM credentials are present. Master switch DEP_AUTO_ASSIGN defaults
 	// to false so this won't fire on a fresh deploy without operator opt-in.
+	// We hoist the variable so the device controller can expose a "run now"
+	// button (admin trigger when not wanting to wait for the next tick).
+	var depScheduler *service.DEPScheduler
 	if cfg.DEPAutoAssign {
 		if cfg.ABMKeyPath == "" || cfg.ABMClientID == "" || cfg.ABMKeyID == "" {
 			log.Printf("[dep-scheduler] disabled: DEP_AUTO_ASSIGN=true but ABM_KEY_PATH/CLIENT_ID/KEY_ID missing")
@@ -165,8 +168,8 @@ func main() {
 				log.Printf("[dep-scheduler] disabled: ABM client init: %v", err)
 			} else {
 				depRepo := postgres.NewDEPAssignmentRepo(pool)
-				scheduler := service.NewDEPScheduler(abmClient, mdmClient, depRepo, cfg.DEPTemplateDir, cfg.DEPPollInterval)
-				scheduler.Start(context.Background())
+				depScheduler = service.NewDEPScheduler(abmClient, mdmClient, depRepo, cfg.DEPTemplateDir, cfg.DEPPollInterval)
+				depScheduler.Start(context.Background())
 				log.Printf("[dep-scheduler] enabled, polling every %s, templates in %s", cfg.DEPPollInterval, cfg.DEPTemplateDir)
 			}
 		}
@@ -259,7 +262,11 @@ func main() {
 	controller.RegisterAll(mux,
 		controller.NewSystemController(pool, cfg),
 		controller.NewAuthController(userRepo, authHelper, cfg.JWTSecret),
-		controller.NewDeviceController(deviceRepo, mdmClient, authHelper),
+		// Wrap *DEPScheduler in an explicit interface var so the controller's
+		// `if scheduler == nil` check works. Passing the concrete *Scheduler
+		// directly would produce a typed-nil interface (interface != nil but
+		// underlying pointer == nil) → silent panic on method call.
+		controller.NewDeviceController(deviceRepo, mdmClient, authHelper, depSchedulerRunner(depScheduler)),
 		controller.NewAssetController(assetRepo, auditRepo, custodyRepo, userRepo, categoryRepo, authHelper),
 		controller.NewInventoryController(inventoryRepo, auditRepo, authHelper),
 		controller.NewRentalController(rentalRepo, assetRepo, userRepo, notifySvc, authHelper),
@@ -369,4 +376,16 @@ func backfillAppIcons(pool *pgxpool.Pool) {
 		}
 		log.Printf("backfill icon: %s → %s", a.bundleID, iconURL[:60]+"...")
 	}
+}
+
+// depSchedulerRunner returns a port.DEPSchedulerRunner that is genuinely nil
+// when the input *DEPScheduler is nil. Without this, Go boxes a typed-nil
+// pointer into a non-nil interface value (interface{}(*X(nil)) != nil), and
+// the controller's `if scheduler == nil` check would fail open, causing a
+// panic on method call.
+func depSchedulerRunner(s *service.DEPScheduler) port.DEPSchedulerRunner {
+	if s == nil {
+		return nil
+	}
+	return s
 }

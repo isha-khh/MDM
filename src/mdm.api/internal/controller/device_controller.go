@@ -12,13 +12,14 @@ import (
 )
 
 type DeviceController struct {
-	deviceRepo *postgres.DeviceRepo
-	mdmClient  port.MicroMDMClient
-	auth       *middleware.AuthHelper
+	deviceRepo   *postgres.DeviceRepo
+	mdmClient    port.MicroMDMClient
+	auth         *middleware.AuthHelper
+	depScheduler port.DEPSchedulerRunner // nil when DEP_AUTO_ASSIGN=false
 }
 
-func NewDeviceController(deviceRepo *postgres.DeviceRepo, mdmClient port.MicroMDMClient, auth *middleware.AuthHelper) *DeviceController {
-	return &DeviceController{deviceRepo: deviceRepo, mdmClient: mdmClient, auth: auth}
+func NewDeviceController(deviceRepo *postgres.DeviceRepo, mdmClient port.MicroMDMClient, auth *middleware.AuthHelper, depScheduler port.DEPSchedulerRunner) *DeviceController {
+	return &DeviceController{deviceRepo: deviceRepo, mdmClient: mdmClient, auth: auth, depScheduler: depScheduler}
 }
 
 func (c *DeviceController) RegisterRoutes(mux *http.ServeMux) {
@@ -26,6 +27,37 @@ func (c *DeviceController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/devices-list", c.handleDevicesList)
 	mux.HandleFunc("/api/devices-available", c.handleDevicesAvailable)
 	mux.HandleFunc("/api/sync-device-info", c.handleSyncDeviceInfo)
+	mux.HandleFunc("/api/dep/apply-now", c.handleDEPApplyNow)
+}
+
+// handleDEPApplyNow runs the DEP scheduler's RunOnce synchronously so an admin
+// can apply profiles to brand-new ABM devices without waiting for the next
+// polling tick. Requires DEP_AUTO_ASSIGN=true at boot (so the scheduler exists).
+//
+// @Summary 立即套用 DEP profile（觸發排程器跑一次）
+// @Tags Device
+// @Produce json
+// @Security BearerAuth
+// @Success 200 {object} swagOK
+// @Failure 503 {object} swagError "DEP 排程器未啟用"
+// @Router /api/dep/apply-now [post]
+func (c *DeviceController) handleDEPApplyNow(w http.ResponseWriter, r *http.Request) {
+	if _, err := c.auth.RequireSysAdmin(r); err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	if c.depScheduler == nil {
+		writeError(w, http.StatusServiceUnavailable, "DEP 自動派發未啟用（DEP_AUTO_ASSIGN=false 或 ABM 設定不完整）")
+		return
+	}
+	// RunOnce logs counts but doesn't return them. Fire-and-acknowledge —
+	// the admin can refresh the page or look at logs for details.
+	c.depScheduler.RunOnce(r.Context())
+	writeJSON(w, map[string]interface{}{"ok": true, "message": "DEP 套用完成，請查看伺服器 log 取得明細"})
+	log.Printf("[dep-apply-now] triggered by admin")
 }
 
 // handleDeviceByID godoc

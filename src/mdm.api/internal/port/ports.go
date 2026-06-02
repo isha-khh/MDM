@@ -191,3 +191,10 @@ type DEPAssignmentRepo interface {
 	Upsert(ctx context.Context, a *domain.DEPAssignment) error
 	ListSerials(ctx context.Context) (map[string]bool, error) // set of all known serials, for batch diff
 }
+
+// DEPSchedulerRunner is the slice of the DEP scheduler the HTTP layer needs
+// to expose a "run now" button. Passed as nil when the scheduler isn't
+// enabled (DEP_AUTO_ASSIGN=false), in which case the endpoint should 503.
+type DEPSchedulerRunner interface {
+	RunOnce(ctx context.Context)
+}
