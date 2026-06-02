@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/anthropics/mdm-server/internal/domain"
@@ -38,6 +39,11 @@ type DEPScheduler struct {
 
 	// throttle between PUTs, configurable for tests.
 	stepDelay time.Duration
+
+	// running guards against overlapping RunOnce calls. The startup tick and
+	// the manual "立即套用" button can otherwise both fire at once, doubling
+	// every Apple DEP PUT (each call mints a new profile UUID, wasting calls).
+	running atomic.Bool
 }
 
 func NewDEPScheduler(abm port.ABMClient, mdm port.MicroMDMClient, repo port.DEPAssignmentRepo, templateDir string, pollInterval time.Duration) *DEPScheduler {
@@ -75,6 +81,9 @@ func (s *DEPScheduler) loop(ctx context.Context) {
 }
 
 // RunOnce performs one poll cycle. Exposed for unit tests and manual triggers.
+// Concurrent calls are serialised — the second caller logs + returns immediately
+// rather than waiting (callers don't usually want to block; the in-flight cycle
+// will reach their device on its next iteration anyway).
 func (s *DEPScheduler) RunOnce(ctx context.Context) {
 	// Defensive against typed-nil interface call. The HTTP layer's nil check
 	// is the primary gate, but this catches misconfiguration paths.
@@ -82,6 +91,12 @@ func (s *DEPScheduler) RunOnce(ctx context.Context) {
 		log.Println("[dep-scheduler] RunOnce called on nil scheduler — ignored")
 		return
 	}
+	if !s.running.CompareAndSwap(false, true) {
+		log.Println("[dep-scheduler] another cycle is already running — skipping this trigger")
+		return
+	}
+	defer s.running.Store(false)
+
 	devices, err := s.abm.ListOrgDevices(ctx)
 	if err != nil {
 		log.Printf("[dep-scheduler] list ABM devices: %v", err)

@@ -3,6 +3,7 @@ package config
 import (
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -84,7 +85,15 @@ func Load() *Config {
 }
 
 func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
+	v := os.Getenv(key)
+	// Defensive: some docker-compose versions don't strip inline comments
+	// from .env, so "DEP_AUTO_ASSIGN=true   # ...comment..." can arrive as
+	// the full string. Cut at " #" then trim whitespace.
+	if i := strings.Index(v, " #"); i >= 0 {
+		v = v[:i]
+	}
+	v = strings.TrimSpace(v)
+	if v != "" {
 		return v
 	}
 	return fallback
