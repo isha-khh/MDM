@@ -42,6 +42,7 @@ func (c *AssetController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/assets-custody", c.handleCustody)
 	mux.HandleFunc("/api/assets-custody/", c.handleCustodyHistory)
 	mux.HandleFunc("/api/assets/", c.handleAssetByID)
+	mux.HandleFunc("/api/assets-batch-update", c.handleBatchUpdate)
 	mux.HandleFunc("/api/device-status", c.handleDeviceStatus)
 	mux.HandleFunc("/api/pickable-assets", c.handlePickableAssets)
 }
@@ -211,6 +212,73 @@ func (c *AssetController) handleAssetByID(w http.ResponseWriter, r *http.Request
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+// handleBatchUpdate godoc
+// @Summary 批次更新資產（分類、存放地點、用途、可租借）
+// @Tags Asset
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param body body swagAssetBatchUpdateReq true "資產 ID 清單與要更新的欄位"
+// @Success 200 {object} map[string]interface{} "{updated, errors}"
+// @Failure 400 {object} swagError
+// @Router /api/assets-batch-update [post]
+func (c *AssetController) handleBatchUpdate(w http.ResponseWriter, r *http.Request) {
+	claims, err := c.auth.RequireModule(r, "asset", "operator")
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	var body struct {
+		IDs    []string               `json:"ids"`
+		Fields map[string]interface{} `json:"fields"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.IDs) == 0 || len(body.Fields) == 0 {
+		writeError(w, http.StatusBadRequest, "ids and fields required")
+		return
+	}
+
+	// Batch edit is intentionally restricted to a handful of low-risk fields.
+	// Custodian changes go through /api/assets-custody (audited transfer
+	// log) and disposal/transfer through /api/assets-lifecycle (audited,
+	// one-way state transitions) — letting this generic endpoint touch
+	// either would silently bypass those compliance trails.
+	allowed := map[string]bool{"category_id": true, "location": true, "purpose": true, "is_rentable": true}
+	filtered := map[string]interface{}{}
+	for k, v := range body.Fields {
+		if allowed[k] {
+			filtered[k] = v
+		}
+	}
+	if len(filtered) == 0 {
+		writeError(w, http.StatusBadRequest, "no editable fields provided")
+		return
+	}
+
+	updated := 0
+	var errs []string
+	for _, id := range body.IDs {
+		if err := c.assetRepo.Update(r.Context(), id, filtered); err != nil {
+			errs = append(errs, id+": "+err.Error())
+			continue
+		}
+		updated++
+	}
+
+	c.auditRepo.Create(r.Context(), &domain.AuditLog{
+		UserID: claims.UserID, Username: claims.Username,
+		Action: "asset_batch_update", Target: strings.Join(body.IDs, ","),
+		Detail: fmt.Sprintf("fields=%v count=%d", filtered, updated), Module: "asset",
+		IPAddress: clientIP(r), UserAgent: r.UserAgent(),
+	})
+
+	writeJSON(w, map[string]interface{}{"updated": updated, "errors": errs})
 }
 
 // handleDeviceStatus godoc

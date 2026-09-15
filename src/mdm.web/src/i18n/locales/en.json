@@ -48,7 +48,9 @@
     "logout": "Logout",
     "selectAll": "Select all",
     "selected": "{{count}} selected",
-    "showing": "Showing {{count}}"
+    "showing": "Showing {{count}}",
+    "yes": "Yes",
+    "no": "No"
   },
   "login": {
     "title": "MDM Console",
@@ -276,6 +278,7 @@
     "location": "Location",
     "category": "Category",
     "notes": "Notes",
+    "isRentable": "Rentable",
     "add": "Add Asset",
     "edit": "Edit",
     "noAsset": "No asset info",
@@ -287,7 +290,18 @@
     "importBadFormat": "Please choose a .xlsx file",
     "importCreated": "{{count}} created",
     "importFailed": "{{count}} failed",
-    "importError": "Import failed"
+    "importError": "Import failed",
+    "batchEdit": {
+      "button": "Batch Edit",
+      "title": "Batch Edit ({{count}} selected)",
+      "hint": "Only checked fields are applied to all selected assets; unchecked fields are left unchanged.",
+      "custodianHint": "Custodian changes are logged individually per asset; assets currently on loan or already disposed/transferred can't have their custodian changed.",
+      "apply": "Apply to {{count}}",
+      "resultFields": "Fields updated: {{updated}} / {{total}} succeeded",
+      "resultCustodian": "Custodian changed: {{updated}} / {{total}} succeeded",
+      "errorCustodian": "Please select a new custodian and enter a reason",
+      "errorSubmit": "Batch edit failed"
+    }
   },
   "custody": {
     "assignTitle": "Assign Custodian",
