@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useDialog } from "../components/DialogProvider";
 import { Link } from "react-router";
-import { Search, Plus, Download, Filter, X, Edit3, Trash2, FileDown, Upload } from "lucide-react";
+import { Search, Plus, Download, Filter, X, Edit3, Trash2, FileDown, Upload, Layers } from "lucide-react";
 import type { ColDef, ICellRendererParams } from "ag-grid-enterprise";
 import apiClient from "../lib/apiClient";
 import { AssetForm } from "../components/AssetForm";
 import { DataGrid } from "../components/DataGrid";
+import { BatchEditAssetsDialog } from "../components/BatchEditAssetsDialog";
 
 interface AssetRow {
   id: string;
@@ -63,6 +64,8 @@ export function AssetList() {
   const [editingAssetId, setEditingAssetId] = useState<string | null>(null); // asset id or "new"
   const [importing, setImporting] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showBatchEdit, setShowBatchEdit] = useState(false);
 
   const loadAssets = async () => {
     setLoading(true);
@@ -150,7 +153,54 @@ export function AssetList() {
     label: "\u00A0\u00A0".repeat(c.level) + c.name,
   }));
 
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAllVisible = () => {
+    const visibleIds = filtered.map((a) => a.id);
+    const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allSelected) {
+        visibleIds.forEach((id) => next.delete(id));
+      } else {
+        visibleIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  };
+
   const columnDefs = useMemo<ColDef<AssetRow>[]>(() => [
+    {
+      headerName: "",
+      colId: "select",
+      width: 44,
+      pinned: "left",
+      sortable: false,
+      filter: false,
+      resizable: false,
+      headerComponent: () => (
+        <input
+          type="checkbox"
+          className="checkbox checkbox-xs"
+          checked={filtered.length > 0 && filtered.every((a) => selectedIds.has(a.id))}
+          onChange={toggleSelectAllVisible}
+        />
+      ),
+      cellRenderer: (p: ICellRendererParams<AssetRow>) => (
+        <input
+          type="checkbox"
+          className="checkbox checkbox-xs"
+          checked={selectedIds.has(p.data!.id)}
+          onChange={() => toggleSelect(p.data!.id)}
+        />
+      ),
+    },
     {
       headerName: t("assets.assetNumber"),
       field: "asset_number",
@@ -252,7 +302,8 @@ export function AssetList() {
         </div>
       ),
     },
-  ], [t]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  ], [t, filtered, selectedIds]);
 
   // Editing inline
   if (editingAssetId) {
@@ -296,6 +347,12 @@ export function AssetList() {
               className="grow w-32"
             />
           </label>
+          {selectedIds.size > 0 && (
+            <button onClick={() => setShowBatchEdit(true)} className="btn btn-secondary btn-sm gap-1">
+              <Layers size={14} /> {t("assets.batchEdit.button")}
+              <span className="badge badge-sm">{selectedIds.size}</span>
+            </button>
+          )}
           <button onClick={() => setEditingAssetId("new")} className="btn btn-primary btn-sm gap-1">
             <Plus size={14} /> {t("assets.add")}
           </button>
@@ -364,6 +421,13 @@ export function AssetList() {
           overlayNoRowsTemplate={`<span class="opacity-50">${t("assets.noAsset")}</span>`}
         />
       </div>
+
+      <BatchEditAssetsDialog
+        open={showBatchEdit}
+        assetIds={Array.from(selectedIds)}
+        onClose={() => setShowBatchEdit(false)}
+        onDone={() => { setSelectedIds(new Set()); loadAssets(); }}
+      />
     </div>
   );
 }

@@ -147,6 +147,21 @@ type swagDeviceStatusReq struct {
 	Status string `json:"status" example:"available" enums:"available,faulty,repairing,retired"`
 }
 
+// swagAssetBatchUpdateFields documents the only fields the batch-update
+// endpoint accepts — category/location/purpose/is_rentable. Custodian and
+// dispose/transfer state go through their own audited endpoints instead.
+type swagAssetBatchUpdateFields struct {
+	CategoryID *string `json:"category_id,omitempty"`
+	Location   *string `json:"location,omitempty"`
+	Purpose    *string `json:"purpose,omitempty"`
+	IsRentable *bool   `json:"is_rentable,omitempty"`
+}
+
+type swagAssetBatchUpdateReq struct {
+	IDs    []string                   `json:"ids"`
+	Fields swagAssetBatchUpdateFields `json:"fields"`
+}
+
 // -- Rental --
 
 type swagRentalReq struct {

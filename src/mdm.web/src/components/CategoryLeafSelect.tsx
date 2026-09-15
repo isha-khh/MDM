@@ -13,6 +13,7 @@ interface CategoryLeafSelectProps {
   onChange: (id: string) => void;
   placeholder?: string;
   className?: string;
+  disabled?: boolean;
 }
 
 /**
@@ -26,6 +27,7 @@ export function CategoryLeafSelect({
   onChange,
   placeholder = "選擇分類",
   className = "select select-bordered select-sm",
+  disabled = false,
 }: CategoryLeafSelectProps) {
   // Collect all IDs that appear as parent_id of another category → non-leaf
   const parentIds = useMemo(() => {
@@ -41,6 +43,7 @@ export function CategoryLeafSelect({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       className={className}
+      disabled={disabled}
     >
       <option value="">{placeholder}</option>
       {categories.map((c) => {
