@@ -80,10 +80,15 @@ export const useEventStore = create<EventStore>((set, get) => ({
   processEvent: (event) => {
     const { addToast } = get();
 
-    set((s) => ({
-      events: [event, ...s.events].slice(0, 200),
-      unreadCount: s.unreadCount + 1,
-    }));
+    // Keep a rolling event log, but do NOT bump unreadCount here — the bell
+    // badge must only count things that will actually show up when the user
+    // opens the tracker. CommandTracker renders trackedCommands exclusively
+    // (not this raw event log), so counting every incoming event here
+    // (including background device check-ins that have nothing to do with
+    // anything the user sent) left the badge climbing while the panel opened
+    // empty. unreadCount is now only incremented in the branches below,
+    // and only when they actually update a tracked command.
+    set((s) => ({ events: [event, ...s.events].slice(0, 200) }));
 
     const status = event.status?.toLowerCase();
     const eventType = event.eventType?.toLowerCase();
@@ -92,15 +97,14 @@ export const useEventStore = create<EventStore>((set, get) => ({
     if (eventType === "command_sent" && event.commandUuid) {
       set((s) => {
         let matched = false;
-        return {
-          trackedCommands: s.trackedCommands.map((cmd) => {
-            if (!matched && cmd.commandUuid === event.commandUuid) {
-              matched = true;
-              return { ...cmd, status: "acknowledged" as const, responseAt: new Date() };
-            }
-            return cmd;
-          }),
-        };
+        const trackedCommands = s.trackedCommands.map((cmd) => {
+          if (!matched && cmd.commandUuid === event.commandUuid) {
+            matched = true;
+            return { ...cmd, status: "acknowledged" as const, responseAt: new Date() };
+          }
+          return cmd;
+        });
+        return { trackedCommands, unreadCount: matched ? s.unreadCount + 1 : s.unreadCount };
       });
       addToast("success", `${event.udid?.slice(0, 12)}... — sent`);
       return;
@@ -108,13 +112,17 @@ export const useEventStore = create<EventStore>((set, get) => ({
 
     // command_error
     if (eventType === "command_error" && event.commandUuid) {
-      set((s) => ({
-        trackedCommands: s.trackedCommands.map((cmd) =>
-          cmd.commandUuid === event.commandUuid
-            ? { ...cmd, status: "error" as const, responseAt: new Date() }
-            : cmd
-        ),
-      }));
+      set((s) => {
+        let matched = false;
+        const trackedCommands = s.trackedCommands.map((cmd) => {
+          if (cmd.commandUuid === event.commandUuid) {
+            matched = true;
+            return { ...cmd, status: "error" as const, responseAt: new Date() };
+          }
+          return cmd;
+        });
+        return { trackedCommands, unreadCount: matched ? s.unreadCount + 1 : s.unreadCount };
+      });
       addToast("error", `${event.udid?.slice(0, 12)}... — error`);
       return;
     }
@@ -124,16 +132,15 @@ export const useEventStore = create<EventStore>((set, get) => ({
       const newStatus = status === "error" ? "error" as const : "acknowledged" as const;
       set((s) => {
         let matched = false;
-        return {
-          trackedCommands: s.trackedCommands.map((cmd) => {
-            if (!matched && cmd.commandUuid === event.commandUuid) {
-              matched = true;
-              addToast(newStatus === "acknowledged" ? "success" : "error", `${cmd.label} — ${event.status}`);
-              return { ...cmd, status: newStatus, responseAt: new Date() };
-            }
-            return cmd;
-          }),
-        };
+        const trackedCommands = s.trackedCommands.map((cmd) => {
+          if (!matched && cmd.commandUuid === event.commandUuid) {
+            matched = true;
+            addToast(newStatus === "acknowledged" ? "success" : "error", `${cmd.label} — ${event.status}`);
+            return { ...cmd, status: newStatus, responseAt: new Date() };
+          }
+          return cmd;
+        });
+        return { trackedCommands, unreadCount: matched ? s.unreadCount + 1 : s.unreadCount };
       });
 
       // Auto-save DeviceInformation to DB
