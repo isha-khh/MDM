@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useDialog } from "../components/DialogProvider";
 import { Link } from "react-router";
 import { Search, Plus, Download, Filter, X, Edit3, Trash2, FileDown, Upload, Layers } from "lucide-react";
-import type { ColDef, ICellRendererParams } from "ag-grid-enterprise";
+import type { ColDef, GridApi, GridReadyEvent, ICellRendererParams, ModelUpdatedEvent } from "ag-grid-enterprise";
 import apiClient from "../lib/apiClient";
 import { AssetForm } from "../components/AssetForm";
 import { DataGrid } from "../components/DataGrid";
@@ -66,6 +66,30 @@ export function AssetList() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showBatchEdit, setShowBatchEdit] = useState(false);
+  const gridApiRef = useRef<GridApi<AssetRow> | null>(null);
+  // IDs actually rendered by AG Grid right now — reflects BOTH our own
+  // top-toolbar filters (search/category/custodian/status/linked) AND AG
+  // Grid's own built-in per-column filters (enabled by DataGrid's default
+  // colDef `filter: true`). `filtered` alone only tracks the former, which
+  // let "select all" grab rows that were hidden by a column filter.
+  const [visibleIds, setVisibleIds] = useState<string[]>([]);
+
+  const syncVisibleIds = (api: GridApi<AssetRow>) => {
+    const ids: string[] = [];
+    api.forEachNodeAfterFilterAndSort((node) => {
+      if (node.data) ids.push(node.data.id);
+    });
+    setVisibleIds(ids);
+  };
+
+  const onGridReady = (e: GridReadyEvent<AssetRow>) => {
+    gridApiRef.current = e.api;
+    syncVisibleIds(e.api);
+  };
+
+  const onModelUpdated = (e: ModelUpdatedEvent<AssetRow>) => {
+    syncVisibleIds(e.api);
+  };
 
   const loadAssets = async () => {
     setLoading(true);
@@ -162,7 +186,6 @@ export function AssetList() {
   };
 
   const toggleSelectAllVisible = () => {
-    const visibleIds = filtered.map((a) => a.id);
     const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -188,7 +211,7 @@ export function AssetList() {
         <input
           type="checkbox"
           className="checkbox checkbox-xs"
-          checked={filtered.length > 0 && filtered.every((a) => selectedIds.has(a.id))}
+          checked={visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id))}
           onChange={toggleSelectAllVisible}
         />
       ),
@@ -303,7 +326,7 @@ export function AssetList() {
       ),
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [t, filtered, selectedIds]);
+  ], [t, visibleIds, selectedIds]);
 
   // Editing inline
   if (editingAssetId) {
@@ -418,6 +441,8 @@ export function AssetList() {
           columnDefs={columnDefs}
           loading={loading}
           getRowId={(p) => p.data.id}
+          onGridReady={onGridReady}
+          onModelUpdated={onModelUpdated}
           overlayNoRowsTemplate={`<span class="opacity-50">${t("assets.noAsset")}</span>`}
         />
       </div>
