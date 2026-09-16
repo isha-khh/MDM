@@ -33,12 +33,42 @@ func NewClient(tokenPath string) (*Client, error) {
 	}, nil
 }
 
+// vppBatchLimit is Apple's hard cap on the associateSerialNumbers /
+// disassociateSerialNumbers array size for a single manageVPPLicensesByAdamIdSrv
+// call. Sending more than this in one request fails the whole call with
+// "error 9602: Associate array size over the limit of 10" — so any batch
+// operation over 10 devices (e.g. selecting many devices in the Commands
+// page and doing Install/Update App (VPP)) must be chunked.
+const vppBatchLimit = 10
+
 func (c *Client) AssignLicense(ctx context.Context, adamID string, serialNumbers []string) (string, error) {
-	return c.manageLicenses(ctx, adamID, serialNumbers, true)
+	return c.manageLicensesBatched(ctx, adamID, serialNumbers, true)
 }
 
 func (c *Client) RevokeLicense(ctx context.Context, adamID string, serialNumbers []string) (string, error) {
-	return c.manageLicenses(ctx, adamID, serialNumbers, false)
+	return c.manageLicensesBatched(ctx, adamID, serialNumbers, false)
+}
+
+// manageLicensesBatched splits serialNumbers into chunks of at most
+// vppBatchLimit and issues one manageVPPLicensesByAdamIdSrv call per chunk,
+// since Apple rejects the whole request if the array is larger than that.
+func (c *Client) manageLicensesBatched(ctx context.Context, adamID string, serialNumbers []string, assign bool) (string, error) {
+	if len(serialNumbers) <= vppBatchLimit {
+		return c.manageLicenses(ctx, adamID, serialNumbers, assign)
+	}
+	var responses []string
+	for i := 0; i < len(serialNumbers); i += vppBatchLimit {
+		end := i + vppBatchLimit
+		if end > len(serialNumbers) {
+			end = len(serialNumbers)
+		}
+		resp, err := c.manageLicenses(ctx, adamID, serialNumbers[i:end], assign)
+		if err != nil {
+			return "", fmt.Errorf("batch %d-%d of %d: %w", i, end, len(serialNumbers), err)
+		}
+		responses = append(responses, resp)
+	}
+	return strings.Join(responses, "\n"), nil
 }
 
 func (c *Client) manageLicenses(ctx context.Context, adamID string, serialNumbers []string, assign bool) (string, error) {
