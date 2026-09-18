@@ -327,7 +327,7 @@ func main() {
 
 func runMigrations(pool *pgxpool.Pool) {
 	ctx := context.Background()
-	for i, sql := range []string{db.MigrationSQL, db.Migration002SQL, db.Migration003SQL, db.Migration004SQL, db.Migration005SQL, db.Migration006SQL, db.Migration007SQL, db.Migration008SQL, db.Migration009SQL, db.Migration010SQL, db.Migration011SQL, db.Migration012SQL, db.Migration013SQL, db.Migration014SQL, db.Migration015SQL, db.Migration016SQL, db.Migration017SQL, db.Migration018SQL, db.Migration019SQL, db.Migration020SQL, db.Migration021SQL, db.Migration022SQL, db.Migration023SQL, db.Migration024SQL, db.Migration025SQL, db.Migration026SQL, db.Migration027SQL, db.Migration028SQL, db.Migration029SQL} {
+	for i, sql := range []string{db.MigrationSQL, db.Migration002SQL, db.Migration003SQL, db.Migration004SQL, db.Migration005SQL, db.Migration006SQL, db.Migration007SQL, db.Migration008SQL, db.Migration009SQL, db.Migration010SQL, db.Migration011SQL, db.Migration012SQL, db.Migration013SQL, db.Migration014SQL, db.Migration015SQL, db.Migration016SQL, db.Migration017SQL, db.Migration018SQL, db.Migration019SQL, db.Migration020SQL, db.Migration021SQL, db.Migration022SQL, db.Migration023SQL, db.Migration024SQL, db.Migration025SQL, db.Migration026SQL, db.Migration027SQL, db.Migration028SQL, db.Migration029SQL, db.Migration030SQL} {
 		if _, err := pool.Exec(ctx, sql); err != nil {
 			log.Printf("migration %d: %v (may already be applied)", i+1, err)
 		} else {

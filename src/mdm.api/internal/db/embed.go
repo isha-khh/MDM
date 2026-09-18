@@ -88,3 +88,6 @@ var Migration028SQL string
 
 //go:embed migrations/029_checklist_templates.up.sql
 var Migration029SQL string
+
+//go:embed migrations/030_rental_two_stage_return.up.sql
+var Migration030SQL string

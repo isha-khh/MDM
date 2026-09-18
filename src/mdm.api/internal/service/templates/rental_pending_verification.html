@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h2 style="color: #0277bd;">有一筆待核對的歸還</h2>
+  <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
+    <tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9; width: 120px;"><strong>單號</strong></td><td style="padding: 8px; border: 1px solid #ddd;">#{{.RentalNumber}}</td></tr>
+    <tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>借用人</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{.BorrowerName}}</td></tr>
+    <tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>裝置</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{range .DeviceNames}}{{.}}<br>{{end}}</td></tr>
+    {{if .Notes}}<tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>備註</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{.Notes}}</td></tr>{{end}}
+  </table>
+  <p>借用人已回報歸還，請登入系統核對清點內容後完成歸還。</p>
+  <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+  <p style="color: #999; font-size: 12px;">此信件由 MDM 管理平台自動發送，請勿直接回覆。</p>
+</body>
+</html>
