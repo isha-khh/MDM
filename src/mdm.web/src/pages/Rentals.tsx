@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { AssetPicker } from "../components/AssetPicker";
 import { CategoryLeafSelect } from "../components/CategoryLeafSelect";
 import apiClient from "../lib/apiClient";
+import DOMPurify from "dompurify";
 import { useDialog } from "../components/DialogProvider";
 import {
   Check, X, RotateCcw, Play, UserPlus, Clock,
@@ -1365,7 +1366,10 @@ export function Rentals() {
           <div className="space-y-3 mt-4 max-h-[50vh] overflow-y-auto">
             {noticePending.map((n) => (
               <div key={n.category_id} className="p-3 rounded border border-base-300">
-                <p className="text-sm whitespace-pre-wrap">{n.content}</p>
+                <div
+                  className="text-sm [&_img]:max-w-full [&_img]:rounded [&_p]:my-1"
+                  dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(n.content) }}
+                />
                 <label className="flex items-center gap-2 text-sm mt-2 cursor-pointer">
                   <input
                     type="checkbox"

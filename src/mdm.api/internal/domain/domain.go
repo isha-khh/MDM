@@ -342,6 +342,21 @@ type CategoryNotice struct {
 	UpdatedAt  time.Time
 }
 
+// CategoryNoticeImage is an image embedded inline in a CategoryNotice's
+// rich-text Content (referenced by an <img> tag pointing at
+// /api/category-notice-images/{ID}). Not tied to a specific notice row by
+// foreign key — CategoryID is just which category's editor uploaded it, so
+// an upload during editing works before the notice text itself is saved.
+type CategoryNoticeImage struct {
+	ID          string
+	CategoryID  *string
+	Content     []byte
+	ContentType string
+	Size        int
+	UploadedBy  *string
+	CreatedAt   time.Time
+}
+
 // CategoryNoticeAck records that UserID has agreed to CategoryID's notice as
 // it read at the time (ContentHash), so a later resolve can tell "already
 // agreed, unchanged" apart from "agreed to a since-edited version" (which

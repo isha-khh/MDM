@@ -97,3 +97,6 @@ var Migration031SQL string
 
 //go:embed migrations/032_category_notices.up.sql
 var Migration032SQL string
+
+//go:embed migrations/033_category_notice_images.up.sql
+var Migration033SQL string
