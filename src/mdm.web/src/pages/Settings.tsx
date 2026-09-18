@@ -13,6 +13,10 @@ interface MailSettings {
   smtp_from: string;
   smtp_from_name: string;
   smtp_tls: boolean;
+  /** 額外信任的內部/私有 CA 憑證（PEM），用於郵件伺服器憑證不被系統信任時 */
+  smtp_ca_cert: string;
+  /** 跳過憑證驗證（不建議，僅在拿不到內部 CA 憑證時作為最後手段） */
+  smtp_insecure_skip_verify: boolean;
 
   incoming_enabled: boolean;
   incoming_protocol: "imap" | "pop3";
@@ -39,6 +43,8 @@ const EMPTY: MailSettings = {
   smtp_from: "",
   smtp_from_name: "",
   smtp_tls: true,
+  smtp_ca_cert: "",
+  smtp_insecure_skip_verify: false,
   incoming_enabled: false,
   incoming_protocol: "imap",
   incoming_host: "",
@@ -234,6 +240,44 @@ export function Settings() {
               <span className="label-text">{t("settings.useTls")}</span>
             </label>
           </div>
+
+          {form.smtp_tls && (
+            <div className="mt-2 space-y-2">
+              <label className="form-control">
+                <span className="label label-text">
+                  內部憑證機構（CA）憑證 <span className="opacity-50 font-normal">（選填，PEM 格式）</span>
+                </span>
+                <textarea
+                  className="textarea textarea-bordered textarea-sm font-mono text-xs"
+                  rows={4}
+                  value={form.smtp_ca_cert}
+                  onChange={(e) => update("smtp_ca_cert", e.target.value)}
+                  placeholder={"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"}
+                />
+                <span className="label">
+                  <span className="label-text-alt opacity-60">
+                    若郵件伺服器使用內部/自簽憑證，導致寄信失敗（certificate signed by unknown authority），
+                    請向 IT 索取該憑證機構的 CA 憑證檔並貼在這裡，系統會額外信任它，其他驗證邏輯不變。
+                  </span>
+                </span>
+              </label>
+              <label className="label cursor-pointer justify-start gap-2">
+                <input type="checkbox" className="checkbox checkbox-sm checkbox-warning"
+                  checked={form.smtp_insecure_skip_verify}
+                  onChange={(e) => update("smtp_insecure_skip_verify", e.target.checked)} />
+                <span className="label-text">
+                  跳過憑證驗證 <span className="text-warning">（不建議，拿不到 CA 憑證時的最後手段）</span>
+                </span>
+              </label>
+              {form.smtp_insecure_skip_verify && (
+                <div role="alert" className="alert alert-warning py-2">
+                  <span className="text-sm">
+                    這會完全關閉郵件伺服器的憑證驗證，可能遭受中間人攻擊竊取帳密。請優先使用上方的 CA 憑證欄位。
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="divider my-2"></div>
           <div className="flex flex-wrap items-end gap-2">

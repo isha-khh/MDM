@@ -10,9 +10,9 @@ import (
 )
 
 type Config struct {
-	ListenAddr   string
-	DatabaseURL  string
-	JWTSecret    string
+	ListenAddr  string
+	DatabaseURL string
+	JWTSecret   string
 	// CookieSecure sets the Secure flag on the auth cookie. Defaults to true
 	// (fail-safe) — local HTTP development must explicitly opt out via
 	// COOKIE_SECURE=false, since browsers refuse to send a Secure cookie over
@@ -52,6 +52,19 @@ type SMTPConfig struct {
 	From     string
 	FromName string
 	TLS      bool
+
+	// CACertPEM, when non-empty, is trusted IN ADDITION TO the system's
+	// default CA pool for the STARTTLS handshake — needed when the mail
+	// server's certificate is signed by an internal/private CA that isn't
+	// publicly trusted. This is the recommended fix for:
+	//   starttls: tls: failed to verify certificate: x509: certificate signed by unknown authority
+	CACertPEM string
+	// InsecureSkipVerify disables TLS certificate verification entirely.
+	// This is an explicit, admin-controlled last resort for when the
+	// internal CA certificate isn't available — it removes protection
+	// against a man-in-the-middle on the path to the mail server. Prefer
+	// CACertPEM whenever possible.
+	InsecureSkipVerify bool
 }
 
 func Load() *Config {
@@ -78,13 +91,15 @@ func Load() *Config {
 		WebhookPath:  envOr("WEBHOOK_PATH", "/webhook"),
 		WebSocketURL: envOr("WEBSOCKET_URL", ""),
 		SMTP: SMTPConfig{
-			Host:     envOr("SMTP_HOST", ""),
-			Port:     envOr("SMTP_PORT", "587"),
-			Username: envOr("SMTP_USERNAME", ""),
-			Password: envOr("SMTP_PASSWORD", ""),
-			From:     envOr("SMTP_FROM", ""),
-			FromName: envOr("SMTP_FROM_NAME", "MDM 管理平台"),
-			TLS:      envOr("SMTP_TLS", "true") == "true",
+			Host:               envOr("SMTP_HOST", ""),
+			Port:               envOr("SMTP_PORT", "587"),
+			Username:           envOr("SMTP_USERNAME", ""),
+			Password:           envOr("SMTP_PASSWORD", ""),
+			From:               envOr("SMTP_FROM", ""),
+			FromName:           envOr("SMTP_FROM_NAME", "MDM 管理平台"),
+			TLS:                envOr("SMTP_TLS", "true") == "true",
+			CACertPEM:          readFileOr(envOr("SMTP_CA_CERT_PATH", ""), ""),
+			InsecureSkipVerify: envOr("SMTP_INSECURE_SKIP_VERIFY", "false") == "true",
 		},
 
 		OIDCIssuerURL:    envOr("OIDC_ISSUER_URL", ""),
@@ -117,4 +132,20 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// readFileOr reads path's content (e.g. a PEM-encoded CA certificate) if
+// path is non-empty, returning fallback if path is empty or the file can't
+// be read. Mirrors how ABMKeyPath/VPPTokenPath are handled elsewhere: env
+// vars point at a file path rather than embedding file content inline.
+func readFileOr(path, fallback string) string {
+	if path == "" {
+		return fallback
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("config: failed to read %q: %v", path, err)
+		return fallback
+	}
+	return string(data)
 }

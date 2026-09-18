@@ -79,3 +79,6 @@ var Migration025SQL string
 
 //go:embed migrations/026_maintenance_iso27001_fields.up.sql
 var Migration026SQL string
+
+//go:embed migrations/027_mail_settings_tls.up.sql
+var Migration027SQL string

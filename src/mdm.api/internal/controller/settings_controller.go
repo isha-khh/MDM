@@ -48,6 +48,11 @@ type mailSettingsDTO struct {
 	SMTPFrom     string `json:"smtp_from"`
 	SMTPFromName string `json:"smtp_from_name"`
 	SMTPTLS      bool   `json:"smtp_tls"`
+	// SMTPCACert: extra CA certificate (PEM) trusted for STARTTLS, for mail
+	// servers signed by an internal/private CA. SMTPInsecureSkipVerify is an
+	// explicit last-resort escape hatch when the CA cert isn't available.
+	SMTPCACert             string `json:"smtp_ca_cert"`
+	SMTPInsecureSkipVerify bool   `json:"smtp_insecure_skip_verify"`
 
 	IncomingEnabled  bool   `json:"incoming_enabled"`
 	IncomingProtocol string `json:"incoming_protocol"`
@@ -141,6 +146,7 @@ func (c *SettingsController) handleMail(w http.ResponseWriter, r *http.Request) 
 					Host: m.SMTPHost, Port: m.SMTPPort,
 					Username: m.SMTPUsername, Password: m.SMTPPassword,
 					From: m.SMTPFrom, FromName: m.SMTPFromName, TLS: m.SMTPTLS,
+					CACertPEM: m.SMTPCACert, InsecureSkipVerify: m.SMTPInsecureSkipVerify,
 				})
 			} else {
 				c.sender.SetConfig(config.SMTPConfig{})
@@ -192,6 +198,7 @@ func (c *SettingsController) handleTestSMTP(w http.ResponseWriter, r *http.Reque
 		Host: m.SMTPHost, Port: m.SMTPPort,
 		Username: m.SMTPUsername, Password: m.SMTPPassword,
 		From: m.SMTPFrom, FromName: m.SMTPFromName, TLS: m.SMTPTLS,
+		CACertPEM: m.SMTPCACert, InsecureSkipVerify: m.SMTPInsecureSkipVerify,
 	}
 	subject := "[MDM] SMTP 測試信"
 	html := `<p>這是一封測試信。若您收到此郵件，代表寄件伺服器設定正確。</p>`
@@ -266,42 +273,46 @@ func (c *SettingsController) handleTestIncoming(w http.ResponseWriter, r *http.R
 
 func dtoFromDomain(m *domain.MailSettings) mailSettingsDTO {
 	return mailSettingsDTO{
-		SMTPEnabled:      m.SMTPEnabled,
-		SMTPHost:         m.SMTPHost,
-		SMTPPort:         m.SMTPPort,
-		SMTPUsername:     m.SMTPUsername,
-		SMTPPassword:     m.SMTPPassword,
-		SMTPFrom:         m.SMTPFrom,
-		SMTPFromName:     m.SMTPFromName,
-		SMTPTLS:          m.SMTPTLS,
-		IncomingEnabled:  m.IncomingEnabled,
-		IncomingProtocol: m.IncomingProtocol,
-		IncomingHost:     m.IncomingHost,
-		IncomingPort:     m.IncomingPort,
-		IncomingUsername: m.IncomingUsername,
-		IncomingPassword: m.IncomingPassword,
-		IncomingTLS:      m.IncomingTLS,
-		IncomingMailbox:  m.IncomingMailbox,
+		SMTPEnabled:            m.SMTPEnabled,
+		SMTPHost:               m.SMTPHost,
+		SMTPPort:               m.SMTPPort,
+		SMTPUsername:           m.SMTPUsername,
+		SMTPPassword:           m.SMTPPassword,
+		SMTPFrom:               m.SMTPFrom,
+		SMTPFromName:           m.SMTPFromName,
+		SMTPTLS:                m.SMTPTLS,
+		SMTPCACert:             m.SMTPCACert,
+		SMTPInsecureSkipVerify: m.SMTPInsecureSkipVerify,
+		IncomingEnabled:        m.IncomingEnabled,
+		IncomingProtocol:       m.IncomingProtocol,
+		IncomingHost:           m.IncomingHost,
+		IncomingPort:           m.IncomingPort,
+		IncomingUsername:       m.IncomingUsername,
+		IncomingPassword:       m.IncomingPassword,
+		IncomingTLS:            m.IncomingTLS,
+		IncomingMailbox:        m.IncomingMailbox,
 	}
 }
 
 func domainFromDTO(d mailSettingsDTO) *domain.MailSettings {
 	return &domain.MailSettings{
-		SMTPEnabled:      d.SMTPEnabled,
-		SMTPHost:         d.SMTPHost,
-		SMTPPort:         d.SMTPPort,
-		SMTPUsername:     d.SMTPUsername,
-		SMTPPassword:     d.SMTPPassword,
-		SMTPFrom:         d.SMTPFrom,
-		SMTPFromName:     d.SMTPFromName,
-		SMTPTLS:          d.SMTPTLS,
-		IncomingEnabled:  d.IncomingEnabled,
-		IncomingProtocol: d.IncomingProtocol,
-		IncomingHost:     d.IncomingHost,
-		IncomingPort:     d.IncomingPort,
-		IncomingUsername: d.IncomingUsername,
-		IncomingPassword: d.IncomingPassword,
-		IncomingTLS:      d.IncomingTLS,
-		IncomingMailbox:  d.IncomingMailbox,
+		SMTPEnabled:            d.SMTPEnabled,
+		SMTPHost:               d.SMTPHost,
+		SMTPPort:               d.SMTPPort,
+		SMTPUsername:           d.SMTPUsername,
+		SMTPPassword:           d.SMTPPassword,
+		SMTPFrom:               d.SMTPFrom,
+		SMTPFromName:           d.SMTPFromName,
+		SMTPTLS:                d.SMTPTLS,
+		SMTPCACert:             d.SMTPCACert,
+		SMTPInsecureSkipVerify: d.SMTPInsecureSkipVerify,
+		IncomingEnabled:        d.IncomingEnabled,
+		IncomingProtocol:       d.IncomingProtocol,
+		IncomingHost:           d.IncomingHost,
+		IncomingPort:           d.IncomingPort,
+		IncomingUsername:       d.IncomingUsername,
+		IncomingPassword:       d.IncomingPassword,
+		IncomingTLS:            d.IncomingTLS,
+		IncomingMailbox:        d.IncomingMailbox,
 	}
 }
