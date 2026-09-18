@@ -232,12 +232,23 @@ function ChecklistLocationField({ item, value, onChange }: {
         <span className="label-text text-sm">{item.label}{item.required && <span className="text-error"> *</span>}</span>
       </label>
       {v?.lat != null ? (
-        <div className="flex items-center gap-2 text-sm flex-wrap">
-          <MapPin size={14} className="text-success" />
-          <a className="link link-primary" target="_blank" rel="noreferrer" href={`https://maps.google.com/?q=${v.lat},${v.lng}`}>
-            已定位（開啟地圖）
-          </a>
-          <button type="button" className="btn btn-ghost btn-xs" onClick={capture}>重新定位</button>
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-sm flex-wrap">
+            <MapPin size={14} className="text-success" />
+            <a className="link link-primary" target="_blank" rel="noreferrer" href={`https://maps.google.com/?q=${v.lat},${v.lng}`}>
+              已定位（開啟地圖）
+            </a>
+            <button type="button" className="btn btn-ghost btn-xs" onClick={capture}>重新定位</button>
+          </div>
+          {/* Simple embed, no API key needed (Google's legacy "output=embed"
+              parameter) — just a quick visual preview, "開啟地圖" above is
+              still the way to get directions/a full interactive map. */}
+          <iframe
+            title={`${item.label} 地圖預覽`}
+            src={`https://maps.google.com/maps?q=${v.lat},${v.lng}&z=16&output=embed`}
+            className="w-full h-40 rounded border border-base-300"
+            loading="lazy"
+          />
         </div>
       ) : manual ? (
         <input
@@ -255,6 +266,68 @@ function ChecklistLocationField({ item, value, onChange }: {
           <button type="button" className="btn btn-link btn-xs" onClick={() => setManual(true)}>改用手動輸入地址</button>
         </div>
       )}
+    </div>
+  );
+}
+
+// Shared dynamic checklist renderer — used by both the return dialog and the
+// daily-report dialog (Phase 1's daily report predates Phase 2a's per-category
+// templates and used to hardcode a single "mileage" number field; it now
+// resolves and renders the same category-bound template as the return flow).
+function ChecklistFields({ items, values, onChange, rentalNumber }: {
+  items: ChecklistItem[];
+  values: ChecklistAnswers;
+  onChange: (key: string, value: unknown) => void;
+  rentalNumber: number;
+}) {
+  return (
+    <div className="space-y-3">
+      {items.map((item) => {
+        const value = values[item.key];
+        const setValue = (v: unknown) => onChange(item.key, v);
+        if (item.type === "boolean") {
+          return (
+            <label key={item.key} className="flex items-center gap-3 cursor-pointer p-2 rounded hover:bg-base-200">
+              <input
+                type="checkbox"
+                className="checkbox checkbox-sm checkbox-success"
+                checked={value === true}
+                onChange={(e) => setValue(e.target.checked)}
+              />
+              <span className="text-sm">{item.label}{item.required && <span className="text-error"> *</span>}</span>
+            </label>
+          );
+        }
+        if (item.type === "text") {
+          return (
+            <div key={item.key} className="form-control">
+              <label className="label"><span className="label-text text-sm">{item.label}{item.required && <span className="text-error"> *</span>}</span></label>
+              <input type="text" className="input input-bordered input-sm" value={(value as string) || ""} onChange={(e) => setValue(e.target.value)} />
+            </div>
+          );
+        }
+        if (item.type === "number") {
+          return (
+            <div key={item.key} className="form-control">
+              <label className="label">
+                <span className="label-text text-sm">{item.label}{item.unit ? `（${item.unit}）` : ""}{item.required && <span className="text-error"> *</span>}</span>
+              </label>
+              <input
+                type="number"
+                className="input input-bordered input-sm"
+                value={value === undefined || value === null ? "" : (value as number)}
+                onChange={(e) => setValue(e.target.value === "" ? "" : Number(e.target.value))}
+              />
+            </div>
+          );
+        }
+        if (item.type === "location") {
+          return <ChecklistLocationField key={item.key} item={item} value={value} onChange={setValue} />;
+        }
+        return (
+          <ChecklistPhotoField key={item.key} item={item} rentalNumber={rentalNumber} value={value} onChange={setValue} />
+        );
+      })}
     </div>
   );
 }
@@ -389,10 +462,13 @@ export function Rentals() {
     setCatLines([{ categoryId: "", quantity: 1 }]);
   };
 
-  // Multi-day rentals (borrow_date ≠ expected_return) may require a reason —
-  // enforced server-side only for "逐日追蹤" categories (e.g. vehicles), but
-  // shown proactively here so the user isn't surprised by a rejected submit.
+  // Multi-day rentals (borrow_date ≠ expected_return) only need a reason when
+  // they touch a "逐日追蹤" category (e.g. vehicles) — enforced server-side,
+  // and resolved here (含繼承, via /api/category-rental-rules/resolve) so the
+  // field only appears when it'll actually be required, instead of on every
+  // multi-day booking regardless of category.
   const isMultiDay = !!expectedReturn && expectedReturn !== borrowDate;
+  const [dailyTrackingHit, setDailyTrackingHit] = useState(false);
 
   const submitCreate = async () => {
     setCreating(true);
@@ -445,6 +521,23 @@ export function Rentals() {
       return Array.from(new Set(selectedAssets.map((id) => byId.get(id)).filter((v): v is string => !!v)));
     } catch { return []; }
   };
+
+  useEffect(() => {
+    if (!isMultiDay) { setDailyTrackingHit(false); return; }
+    let cancelled = false;
+    (async () => {
+      const categoryIds = await resolveCreateCategoryIds();
+      if (categoryIds.length === 0) { if (!cancelled) setDailyTrackingHit(false); return; }
+      try {
+        const { data } = await apiClient.get("/api/category-rental-rules/resolve", {
+          params: { category_ids: categoryIds.join(",") },
+        });
+        if (!cancelled) setDailyTrackingHit(!!data.daily_tracking_required);
+      } catch { if (!cancelled) setDailyTrackingHit(false); }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMultiDay, createTab, selectedAssets, catLines]);
 
   const handleCreateClick = async () => {
     setNoticeChecking(true);
@@ -533,15 +626,20 @@ export function Rentals() {
     }
   };
 
-  // Daily report dialog (逐日追蹤分類：每日回報，跟歸還是分開的動作)
+  // Daily report dialog (逐日追蹤分類：每日回報，跟歸還是分開的動作)。項目
+  // 跟歸還清點共用同一套分類範本解析（Phase 2a 之前這裡曾經寫死一個「里程數」
+  // 欄位，現在改成跟歸還一樣依分類動態渲染）。
   const [dailyReportGroup, setDailyReportGroup] = useState<RentalGroup | null>(null);
   const [dailyReportDate, setDailyReportDate] = useState("");
-  const [dailyReportMileage, setDailyReportMileage] = useState("");
+  const [dailyReportItems, setDailyReportItems] = useState<ChecklistItem[]>([]);
+  const [dailyReportItemsLoading, setDailyReportItemsLoading] = useState(false);
+  const [dailyReportValues, setDailyReportValues] = useState<ChecklistAnswers>({});
   const [dailyReportBackfillReason, setDailyReportBackfillReason] = useState("");
   const [dailyReportExistingDates, setDailyReportExistingDates] = useState<string[]>([]);
   const [dailyReportSubmitting, setDailyReportSubmitting] = useState(false);
 
   const isDailyReportBackfill = dailyReportDate !== "" && dailyReportDate !== todayStr();
+  const dailyReportRequiredFilled = dailyReportItems.every((item) => isChecklistItemFilled(item, dailyReportValues[item.key]));
 
   const openDailyReport = async (group: RentalGroup) => {
     const rentalId = group.rentals[0].id;
@@ -552,24 +650,45 @@ export function Rentals() {
     } catch { /* best-effort — an empty list just means no prior reports fetched */ }
     setDailyReportExistingDates(existingDates);
     setDailyReportGroup(group);
-    setDailyReportMileage("");
+    setDailyReportValues({});
     setDailyReportBackfillReason("");
     // Default to today unless it's already covered, in which case default to
     // blank so the user has to deliberately pick a missed day to backfill.
     setDailyReportDate(existingDates.includes(todayStr()) ? "" : todayStr());
+
+    setDailyReportItemsLoading(true);
+    try {
+      const categoryIds = Array.from(new Set(group.rentals.map((rl) => rl.category_id).filter((v): v is string => !!v)));
+      const { data } = await apiClient.get("/api/checklist-templates/resolve", {
+        params: { category_ids: categoryIds.join(",") },
+      });
+      setDailyReportItems(data.items || []);
+    } catch {
+      setDailyReportItems([]);
+    } finally { setDailyReportItemsLoading(false); }
+  };
+
+  // Closes the dialog AND clears dailyReportItems together — leaving stale
+  // (non-empty) items around while dailyReportGroup is null would make the
+  // dialog's still-mounted (just CSS-hidden) content try to render
+  // ChecklistFields with rentalNumber={dailyReportGroup!.rental_number},
+  // crashing on the null dereference.
+  const closeDailyReportDialog = () => {
+    setDailyReportGroup(null);
+    setDailyReportItems([]);
   };
 
   const confirmDailyReport = async () => {
     if (!dailyReportGroup || !dailyReportDate) return;
     setDailyReportSubmitting(true);
     try {
-      const body: Record<string, unknown> = { checklist: { mileage: dailyReportMileage ? Number(dailyReportMileage) : null } };
+      const body: Record<string, unknown> = { checklist: dailyReportValues };
       if (isDailyReportBackfill) {
         body.report_date = dailyReportDate;
         body.backfill_reason = dailyReportBackfillReason;
       }
       await apiClient.post(`/api/rentals/${dailyReportGroup.rentals[0].id}/daily-report`, body);
-      setDailyReportGroup(null);
+      closeDailyReportDialog();
       loadRentals();
     } catch (err: unknown) {
       const resp = (err as { response?: { data?: { error?: string } } })?.response?.data;
@@ -592,6 +711,15 @@ export function Rentals() {
     }
   };
 
+  // Same reasoning as closeDailyReportDialog — clear returnItems together
+  // with returnGroup so the still-mounted (CSS-hidden) dialog never renders
+  // ChecklistFields with rentalNumber={returnGroup!.rental_number} while
+  // returnGroup is null.
+  const closeReturnDialog = () => {
+    setReturnGroup(null);
+    setReturnItems([]);
+  };
+
   const confirmReturn = async () => {
     if (!returnGroup) return;
     try {
@@ -607,7 +735,7 @@ export function Rentals() {
           cross_day_reason: crossDayReason,
         });
       }
-      setReturnGroup(null);
+      closeReturnDialog();
       loadRentals();
     } catch (err: unknown) {
       const resp = (err as { response?: { data?: { error?: string } } })?.response?.data;
@@ -974,11 +1102,11 @@ export function Rentals() {
                   <label className="label"><span className="label-text font-medium">備註</span></label>
                   <input type="text" value={notes} onChange={(e) => setNotes(e.target.value)} className="input input-bordered input-sm" placeholder="其他備註" />
                 </div>
-                {isMultiDay && (
+                {isMultiDay && dailyTrackingHit && (
                   <div className="form-control sm:col-span-2">
                     <label className="label">
                       <span className="label-text font-medium">跨日說明</span>
-                      <span className="label-text-alt opacity-60">車輛等逐日追蹤分類的跨日租借必填，其他分類可留空</span>
+                      <span className="label-text-alt opacity-60">此分類為逐日追蹤，跨日租借需說明原因</span>
                     </label>
                     <input
                       type="text"
@@ -1091,53 +1219,13 @@ export function Rentals() {
           ) : returnItems.length === 0 ? (
             <p className="text-sm text-base-content/50 py-4 text-center">此分類沒有設定歸還清點項目</p>
           ) : (
-            <div className="space-y-3 mt-4">
-              {returnItems.map((item) => {
-                const value = returnValues[item.key];
-                const setValue = (v: unknown) => setReturnValues((prev) => ({ ...prev, [item.key]: v }));
-                if (item.type === "boolean") {
-                  return (
-                    <label key={item.key} className="flex items-center gap-3 cursor-pointer p-2 rounded hover:bg-base-200">
-                      <input
-                        type="checkbox"
-                        className="checkbox checkbox-sm checkbox-success"
-                        checked={value === true}
-                        onChange={(e) => setValue(e.target.checked)}
-                      />
-                      <span className="text-sm">{item.label}{item.required && <span className="text-error"> *</span>}</span>
-                    </label>
-                  );
-                }
-                if (item.type === "text") {
-                  return (
-                    <div key={item.key} className="form-control">
-                      <label className="label"><span className="label-text text-sm">{item.label}{item.required && <span className="text-error"> *</span>}</span></label>
-                      <input type="text" className="input input-bordered input-sm" value={(value as string) || ""} onChange={(e) => setValue(e.target.value)} />
-                    </div>
-                  );
-                }
-                if (item.type === "number") {
-                  return (
-                    <div key={item.key} className="form-control">
-                      <label className="label">
-                        <span className="label-text text-sm">{item.label}{item.unit ? `（${item.unit}）` : ""}{item.required && <span className="text-error"> *</span>}</span>
-                      </label>
-                      <input
-                        type="number"
-                        className="input input-bordered input-sm"
-                        value={value === undefined || value === null ? "" : (value as number)}
-                        onChange={(e) => setValue(e.target.value === "" ? "" : Number(e.target.value))}
-                      />
-                    </div>
-                  );
-                }
-                if (item.type === "location") {
-                  return <ChecklistLocationField key={item.key} item={item} value={value} onChange={setValue} />;
-                }
-                return (
-                  <ChecklistPhotoField key={item.key} item={item} rentalNumber={returnGroup!.rental_number} value={value} onChange={setValue} />
-                );
-              })}
+            <div className="mt-4">
+              <ChecklistFields
+                items={returnItems}
+                values={returnValues}
+                onChange={(key, v) => setReturnValues((prev) => ({ ...prev, [key]: v }))}
+                rentalNumber={returnGroup!.rental_number}
+              />
             </div>
           )}
 
@@ -1175,7 +1263,7 @@ export function Rentals() {
           )}
 
           <div className="modal-action">
-            <button className="btn btn-sm" onClick={() => setReturnGroup(null)}>取消</button>
+            <button className="btn btn-sm" onClick={closeReturnDialog}>取消</button>
             <button
               className="btn btn-warning btn-sm gap-1"
               disabled={!allRequiredFilled || (isOverdueVerify && !crossDayReason.trim())}
@@ -1186,7 +1274,7 @@ export function Rentals() {
           </div>
         </div>
         <form method="dialog" className="modal-backdrop">
-          <button onClick={() => setReturnGroup(null)}>close</button>
+          <button onClick={closeReturnDialog}>close</button>
         </form>
       </dialog>
 
@@ -1195,7 +1283,7 @@ export function Rentals() {
         <div className="modal-box">
           <h3 className="font-bold text-lg">每日回報</h3>
           <p className="text-sm text-base-content/60 mt-1">
-            單號 {dailyReportGroup?.rental_number}，記錄今天（或補登遺漏的一天）的里程
+            單號 {dailyReportGroup?.rental_number}，記錄今天（或補登遺漏的一天）的檢查項目
           </p>
 
           <div className="form-control mt-4">
@@ -1223,15 +1311,19 @@ export function Rentals() {
             </select>
           </div>
 
-          <div className="form-control mt-3">
-            <label className="label"><span className="label-text text-sm">里程數（km）</span></label>
-            <input
-              type="number"
-              value={dailyReportMileage}
-              onChange={(e) => setDailyReportMileage(e.target.value)}
-              className="input input-bordered input-sm"
-              placeholder="例如：12345"
-            />
+          <div className="mt-3">
+            {dailyReportItemsLoading ? (
+              <div className="flex justify-center py-8"><span className="loading loading-spinner"></span></div>
+            ) : dailyReportItems.length === 0 ? (
+              <p className="text-sm text-base-content/50 py-4 text-center">此分類沒有設定檢查清單項目</p>
+            ) : (
+              <ChecklistFields
+                items={dailyReportItems}
+                values={dailyReportValues}
+                onChange={(key, v) => setDailyReportValues((prev) => ({ ...prev, [key]: v }))}
+                rentalNumber={dailyReportGroup!.rental_number}
+              />
+            )}
           </div>
 
           {isDailyReportBackfill && (
@@ -1248,10 +1340,10 @@ export function Rentals() {
           )}
 
           <div className="modal-action">
-            <button className="btn btn-sm" onClick={() => setDailyReportGroup(null)}>取消</button>
+            <button className="btn btn-sm" onClick={closeDailyReportDialog}>取消</button>
             <button
               className="btn btn-primary btn-sm gap-1"
-              disabled={dailyReportSubmitting || !dailyReportDate || (isDailyReportBackfill && !dailyReportBackfillReason.trim())}
+              disabled={dailyReportSubmitting || !dailyReportDate || !dailyReportRequiredFilled || (isDailyReportBackfill && !dailyReportBackfillReason.trim())}
               onClick={confirmDailyReport}
             >
               {dailyReportSubmitting && <span className="loading loading-spinner loading-xs"></span>}
@@ -1260,7 +1352,7 @@ export function Rentals() {
           </div>
         </div>
         <form method="dialog" className="modal-backdrop">
-          <button onClick={() => setDailyReportGroup(null)}>close</button>
+          <button onClick={closeDailyReportDialog}>close</button>
         </form>
       </dialog>
 
