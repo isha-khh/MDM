@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { Search, X, Tablet, Package, Check, Hash } from "lucide-react";
+import { Search, X, Tablet, Package, Check, Hash, MapPin } from "lucide-react";
 import apiClient from "../lib/apiClient";
 
 interface CategoryOption { id: string; name: string; level: number; }
@@ -17,6 +17,12 @@ interface AssetItem {
   asset_status: string;
   category_id: string | null;
   category_name: string;
+  // Phase 2c of 租借 2.1: set when a past rental's return checklist
+  // included a "location" type answer for this asset. Separate from any
+  // manually-maintained storage location — only shown when present, so
+  // most (non-vehicle) assets show nothing extra here.
+  last_return_location?: { lat?: number; lng?: number; address?: string } | null;
+  last_return_at?: string | null;
 }
 
 interface AssetPickerProps {
@@ -260,6 +266,25 @@ export function AssetPicker({ selected, onChange, showFilters, endpoint = "/api/
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium truncate">{primary}</div>
                     <div className="text-xs opacity-50 truncate">{secondary || "-"}</div>
+                    {a.last_return_location && (
+                      <div className="text-xs text-info flex items-center gap-1 truncate">
+                        <MapPin size={10} className="flex-shrink-0" />
+                        {a.last_return_location.address
+                          ? a.last_return_location.address
+                          : a.last_return_location.lat != null ? (
+                            <a
+                              href={`https://maps.google.com/?q=${a.last_return_location.lat},${a.last_return_location.lng}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="link"
+                            >
+                              最後位置（開啟地圖）
+                            </a>
+                          ) : "最後位置"}
+                        {a.last_return_at && <span className="opacity-60">（{new Date(a.last_return_at).toLocaleDateString()}）</span>}
+                      </div>
+                    )}
                   </div>
                   {!a.device_udid && (
                     <span className="badge badge-outline badge-xs flex-shrink-0">獨立</span>

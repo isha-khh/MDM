@@ -146,6 +146,12 @@ type PickableAsset struct {
 	AssetStatus  string
 	CategoryID   *string
 	CategoryName string
+	// LastReturnLocation/LastReturnAt (Phase 2c of 租借 2.1) — set when a
+	// rental's stage-2 verify checklist included a "location" type answer.
+	// Separate from Asset.Location (the manually-maintained storage
+	// location); nil/zero when never captured or not applicable.
+	LastReturnLocation map[string]interface{}
+	LastReturnAt       *time.Time
 }
 
 // AssetCustodyLog records every change to an asset's custodian.

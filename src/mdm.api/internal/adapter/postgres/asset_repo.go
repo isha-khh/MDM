@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -161,20 +162,33 @@ func (r *AssetRepo) Delete(ctx context.Context, id string) error {
 	return err
 }
 
+// UpdateLastReturnLocation records where a rental's stage-2 verify checklist
+// said an asset was when it came back (Phase 2c of 租借 2.1) — a "location"
+// type checklist answer, distinct from and never overwriting the
+// manually-maintained assets.location (storage location) field.
+func (r *AssetRepo) UpdateLastReturnLocation(ctx context.Context, assetID string, locationJSON []byte) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE assets SET last_return_location=$1, last_return_at=now() WHERE id=$2`,
+		locationJSON, assetID)
+	return err
+}
+
 // RentalPickableAsset is the lightweight shape returned to the rental asset picker.
 // Covers both MDM-linked and standalone assets.
 type RentalPickableAsset struct {
-	AssetID      string
-	AssetNumber  string
-	Name         string
-	Spec         string
-	DeviceUdid   *string
-	SerialNumber string
-	Model        string
-	OSVersion    string
-	AssetStatus  string
-	CategoryID   *string
-	CategoryName string
+	AssetID            string
+	AssetNumber        string
+	Name               string
+	Spec               string
+	DeviceUdid         *string
+	SerialNumber       string
+	Model              string
+	OSVersion          string
+	AssetStatus        string
+	CategoryID         *string
+	CategoryName       string
+	LastReturnLocation map[string]interface{}
+	LastReturnAt       *time.Time
 }
 
 // ListRentalPickable returns every asset that could potentially be borrowed, plus
@@ -186,7 +200,8 @@ func (r *AssetRepo) ListRentalPickable(ctx context.Context) ([]*RentalPickableAs
 	             COALESCE(d.serial_number,''), COALESCE(d.model,''), COALESCE(d.os_version,''),
 	             COALESCE(a.asset_status,'available') as asset_status,
 	             a.category_id, COALESCE(c.name,''),
-	             EXISTS(SELECT 1 FROM rentals rl WHERE rl.asset_id = a.id AND rl.status IN ('pending','approved','active')) as is_rented
+	             EXISTS(SELECT 1 FROM rentals rl WHERE rl.asset_id = a.id AND rl.status IN ('pending','approved','active')) as is_rented,
+	             a.last_return_location, a.last_return_at
 	      FROM assets a
 	      LEFT JOIN devices d ON a.device_udid = d.udid
 	      LEFT JOIN categories c ON a.category_id = c.id
@@ -202,14 +217,19 @@ func (r *AssetRepo) ListRentalPickable(ctx context.Context) ([]*RentalPickableAs
 	for rows.Next() {
 		it := &RentalPickableAsset{}
 		var isRented bool
+		var lastReturnLocationJSON []byte
 		if err := rows.Scan(&it.AssetID, &it.AssetNumber, &it.Name, &it.Spec,
 			&it.DeviceUdid,
 			&it.SerialNumber, &it.Model, &it.OSVersion,
-			&it.AssetStatus, &it.CategoryID, &it.CategoryName, &isRented); err != nil {
+			&it.AssetStatus, &it.CategoryID, &it.CategoryName, &isRented,
+			&lastReturnLocationJSON, &it.LastReturnAt); err != nil {
 			continue
 		}
 		if isRented {
 			it.AssetStatus = "rented"
+		}
+		if len(lastReturnLocationJSON) > 0 {
+			json.Unmarshal(lastReturnLocationJSON, &it.LastReturnLocation)
 		}
 		out = append(out, it)
 	}
@@ -224,7 +244,8 @@ func (r *AssetRepo) ListPickable(ctx context.Context) ([]domain.PickableAsset, e
 	             a.device_udid,
 	             COALESCE(d.serial_number,''), COALESCE(d.model,''), COALESCE(d.os_version,''),
 	             COALESCE(a.asset_status,'available') as asset_status,
-	             a.category_id, COALESCE(c.name,'')
+	             a.category_id, COALESCE(c.name,''),
+	             a.last_return_location, a.last_return_at
 	      FROM assets a
 	      LEFT JOIN devices d ON a.device_udid = d.udid
 	      LEFT JOIN categories c ON a.category_id = c.id
@@ -238,11 +259,16 @@ func (r *AssetRepo) ListPickable(ctx context.Context) ([]domain.PickableAsset, e
 	var out []domain.PickableAsset
 	for rows.Next() {
 		it := domain.PickableAsset{}
+		var lastReturnLocationJSON []byte
 		if err := rows.Scan(&it.AssetID, &it.AssetNumber, &it.Name, &it.Spec,
 			&it.DeviceUdid,
 			&it.SerialNumber, &it.Model, &it.OSVersion,
-			&it.AssetStatus, &it.CategoryID, &it.CategoryName); err != nil {
+			&it.AssetStatus, &it.CategoryID, &it.CategoryName,
+			&lastReturnLocationJSON, &it.LastReturnAt); err != nil {
 			continue
+		}
+		if len(lastReturnLocationJSON) > 0 {
+			json.Unmarshal(lastReturnLocationJSON, &it.LastReturnLocation)
 		}
 		out = append(out, it)
 	}
