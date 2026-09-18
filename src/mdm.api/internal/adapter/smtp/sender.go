@@ -3,6 +3,7 @@ package smtp
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
@@ -180,7 +181,7 @@ func sendWith(cfg config.SMTPConfig, to, subject, htmlBody string) error {
 	auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
 
 	if cfg.TLS {
-		err = sendWithTLS(addr, auth, cfg.Host, cleanFrom, cleanTo, msg)
+		err = sendWithTLS(addr, auth, cfg, cleanFrom, cleanTo, msg)
 	} else {
 		err = smtp.SendMail(addr, auth, cleanFrom, []string{cleanTo}, msg)
 	}
@@ -192,6 +193,43 @@ func sendWith(cfg config.SMTPConfig, to, subject, htmlBody string) error {
 	return nil
 }
 
+// buildTLSConfig assembles the tls.Config used for the STARTTLS handshake.
+// By default this verifies the server certificate against the system's
+// trust store, same as before. Two admin-controlled opt-ins exist for mail
+// servers whose certificate the system doesn't already trust (common for
+// on-prem/internal mail relays using a private CA):
+//
+//   - cfg.CACertPEM: the extra CA certificate is trusted IN ADDITION TO the
+//     system pool — the recommended fix, since the connection is still
+//     verified, just against a trust list that now includes the internal CA.
+//   - cfg.InsecureSkipVerify: disables certificate verification entirely.
+//     This is a deliberate, explicit last resort (surfaced as its own toggle
+//     in the mail settings UI, off by default) for when the CA certificate
+//     isn't available — it removes protection against a man-in-the-middle
+//     on the path to the mail server, so CACertPEM should always be tried
+//     first.
+func buildTLSConfig(cfg config.SMTPConfig) (*tls.Config, error) {
+	tlsConfig := &tls.Config{ServerName: cfg.Host}
+
+	if cfg.CACertPEM != "" {
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if ok := pool.AppendCertsFromPEM([]byte(cfg.CACertPEM)); !ok {
+			return nil, errors.New("SMTP CA certificate is not valid PEM")
+		}
+		tlsConfig.RootCAs = pool
+	}
+
+	if cfg.InsecureSkipVerify {
+		log.Printf("[smtp] WARNING: TLS certificate verification is disabled for %s (smtp_insecure_skip_verify=true) — this is insecure; configure the internal CA certificate instead if at all possible", cfg.Host)
+		tlsConfig.InsecureSkipVerify = true //nolint:gosec // explicit, admin-controlled opt-in; see doc comment above
+	}
+
+	return tlsConfig, nil
+}
+
 // sendWithTLS speaks STARTTLS: connect in plaintext (as the SMTP submission
 // port, almost always 587, expects) and then upgrade the connection before
 // authenticating. This is NOT implicit/direct TLS (that's port 465, where the
@@ -199,7 +237,8 @@ func sendWith(cfg config.SMTPConfig, to, subject, htmlBody string) error {
 // TLS on a STARTTLS-only port fails immediately with "first record does not
 // look like a TLS handshake" because the server's plaintext greeting isn't a
 // valid TLS record.
-func sendWithTLS(addr string, auth smtp.Auth, host, from, to string, msg []byte) error {
+func sendWithTLS(addr string, auth smtp.Auth, cfg config.SMTPConfig, from, to string, msg []byte) error {
+	host := cfg.Host
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
@@ -210,7 +249,11 @@ func sendWithTLS(addr string, auth smtp.Auth, host, from, to string, msg []byte)
 	}
 	defer client.Close()
 
-	if err := client.StartTLS(&tls.Config{ServerName: host}); err != nil {
+	tlsConfig, err := buildTLSConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("starttls: %w", err)
+	}
+	if err := client.StartTLS(tlsConfig); err != nil {
 		return fmt.Errorf("starttls: %w", err)
 	}
 

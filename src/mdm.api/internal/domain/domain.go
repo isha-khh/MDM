@@ -459,6 +459,12 @@ type MailSettings struct {
 	SMTPFrom     string
 	SMTPFromName string
 	SMTPTLS      bool
+	// SMTPCACert, when set, is an extra CA certificate (PEM) trusted for the
+	// STARTTLS handshake — for mail servers using an internal/private CA.
+	SMTPCACert string
+	// SMTPInsecureSkipVerify disables TLS certificate verification entirely.
+	// Explicit admin opt-in, off by default; prefer SMTPCACert instead.
+	SMTPInsecureSkipVerify bool
 
 	// Incoming (IMAP / POP3)
 	IncomingEnabled  bool
