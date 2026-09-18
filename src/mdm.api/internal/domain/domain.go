@@ -329,6 +329,31 @@ type ChecklistPhoto struct {
 	CreatedAt    time.Time
 }
 
+// CategoryNotice is a category-bound "please read and agree" notice shown to
+// the borrower when submitting a rental request that touches this category.
+// Resolved with the same "walk up categories.parent_id, first explicit row
+// wins" inheritance as CategoryRentalRule/ChecklistTemplate, but with no
+// global-default fallback: a category with nothing set anywhere in its
+// ancestor chain simply has no notice to show.
+type CategoryNotice struct {
+	CategoryID string
+	Content    string
+	UpdatedBy  *string
+	UpdatedAt  time.Time
+}
+
+// CategoryNoticeAck records that UserID has agreed to CategoryID's notice as
+// it read at the time (ContentHash), so a later resolve can tell "already
+// agreed, unchanged" apart from "agreed to a since-edited version" (which
+// must be shown again) without keeping a second copy of the text.
+type CategoryNoticeAck struct {
+	ID          string
+	UserID      string
+	CategoryID  string
+	ContentHash string
+	AckedAt     time.Time
+}
+
 // --- Maintenance (Equipment dispatch) Management ---
 
 // MaintenanceRequest is one asset line of a 資通設備進出及維護申請單.
