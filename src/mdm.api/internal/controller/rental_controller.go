@@ -28,12 +28,13 @@ type RentalController struct {
 	categoryRepo    port.CategoryRepository
 	rentalRuleRepo  *postgres.CategoryRentalRuleRepo
 	dailyReportRepo *postgres.RentalDailyReportRepo
+	templateRepo    *postgres.ChecklistTemplateRepo
 }
 
-func NewRentalController(rentalRepo *postgres.RentalRepo, assetRepo *postgres.AssetRepo, userRepo port.UserRepository, notifySvc *service.NotifyService, auth *middleware.AuthHelper, categoryRepo port.CategoryRepository, rentalRuleRepo *postgres.CategoryRentalRuleRepo, dailyReportRepo *postgres.RentalDailyReportRepo) *RentalController {
+func NewRentalController(rentalRepo *postgres.RentalRepo, assetRepo *postgres.AssetRepo, userRepo port.UserRepository, notifySvc *service.NotifyService, auth *middleware.AuthHelper, categoryRepo port.CategoryRepository, rentalRuleRepo *postgres.CategoryRentalRuleRepo, dailyReportRepo *postgres.RentalDailyReportRepo, templateRepo *postgres.ChecklistTemplateRepo) *RentalController {
 	return &RentalController{
 		rentalRepo: rentalRepo, assetRepo: assetRepo, userRepo: userRepo, notifySvc: notifySvc, auth: auth,
-		categoryRepo: categoryRepo, rentalRuleRepo: rentalRuleRepo, dailyReportRepo: dailyReportRepo,
+		categoryRepo: categoryRepo, rentalRuleRepo: rentalRuleRepo, dailyReportRepo: dailyReportRepo, templateRepo: templateRepo,
 	}
 }
 
@@ -105,6 +106,47 @@ func sameCalendarDay(a, b time.Time) bool {
 func dateOnly(t time.Time) time.Time {
 	y, m, d := t.Date()
 	return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
+}
+
+// formatChecklistValue renders one return_checklist answer for Excel export,
+// using item's resolved type (if known) to pick a sensible representation.
+// item may be the zero value when the key couldn't be resolved to any
+// template (e.g. stale data from a since-edited template) — in that case it
+// falls back to a generic string print.
+func formatChecklistValue(item domain.ChecklistItem, value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	switch item.Type {
+	case "boolean":
+		if b, ok := value.(bool); ok && b {
+			return "V"
+		}
+		return ""
+	case "number":
+		s := fmt.Sprintf("%v", value)
+		if item.Unit != "" {
+			s += " " + item.Unit
+		}
+		return s
+	case "location":
+		if m, ok := value.(map[string]interface{}); ok {
+			if addr, ok := m["address"].(string); ok && addr != "" {
+				return addr
+			}
+			if lat, ok := m["lat"]; ok {
+				return fmt.Sprintf("%v,%v", lat, m["lng"])
+			}
+		}
+		return fmt.Sprintf("%v", value)
+	case "photo":
+		if arr, ok := value.([]interface{}); ok {
+			return fmt.Sprintf("%d 張照片", len(arr))
+		}
+		return ""
+	default:
+		return fmt.Sprintf("%v", value)
+	}
 }
 
 // buildNotifyData gathers device names and common fields for notification emails.
@@ -246,7 +288,7 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 				"custodian_id": rl.CustodianID, "custodian_name": rl.CustodianName,
 				"rental_number": rl.RentalNumber, "is_archived": rl.IsArchived,
 				"return_checklist": rl.ReturnChecklist, "return_notes": rl.ReturnNotes,
-				"multi_day_reason": rl.MultiDayReason,
+				"multi_day_reason": rl.MultiDayReason, "category_id": rl.CategoryID,
 			}
 			if rl.CategoryID != nil {
 				dailyTracking, dErr := c.rentalRuleRepo.ResolveDailyTrackingRequired(r.Context(), categoriesCache, *rl.CategoryID)
@@ -837,12 +879,44 @@ func (c *RentalController) handleExport(w http.ResponseWriter, r *http.Request) 
 		"pending": "待核准", "approved": "已核准", "active": "借出中",
 		"returned": "已歸還", "rejected": "已拒絕",
 	}
-	checklistLabels := [][2]string{
-		{"deviceReceived", "已收到裝置"},
-		{"screenOk", "螢幕正常"},
-		{"bodyOk", "機身正常"},
-		{"canPowerOn", "可開機"},
-		{"accessoriesOk", "配件齊全"},
+
+	// Dynamic checklist columns (Phase 2a): scan the keys that actually
+	// appear in this export's return_checklist data, in first-seen order,
+	// rather than a hardcoded 5-column list. Also try to resolve each key's
+	// real label/type from the checklist templates of categories represented
+	// in this export, falling back to the bare key when a key isn't found in
+	// any of them (e.g. old data from a since-edited template).
+	var checklistKeys []string
+	seenKeys := map[string]bool{}
+	for _, g := range groups {
+		for k := range g.First.ReturnChecklist {
+			if !seenKeys[k] {
+				seenKeys[k] = true
+				checklistKeys = append(checklistKeys, k)
+			}
+		}
+	}
+	itemMeta := map[string]domain.ChecklistItem{}
+	if len(checklistKeys) > 0 {
+		catsCache, _ := c.categoryRepo.List(r.Context())
+		seenCategories := map[string]bool{}
+		for _, g := range groups {
+			for _, rl := range g.Rentals {
+				if rl.CategoryID == nil || seenCategories[*rl.CategoryID] {
+					continue
+				}
+				seenCategories[*rl.CategoryID] = true
+				items, err := c.templateRepo.ResolveForCategory(r.Context(), catsCache, *rl.CategoryID)
+				if err != nil {
+					continue
+				}
+				for _, it := range items {
+					if _, ok := itemMeta[it.Key]; !ok {
+						itemMeta[it.Key] = it
+					}
+				}
+			}
+		}
 	}
 
 	f := excelize.NewFile()
@@ -854,8 +928,12 @@ func (c *RentalController) handleExport(w http.ResponseWriter, r *http.Request) 
 		"單號", "裝置數", "裝置名稱", "裝置序號", "借用人", "保管人",
 		"用途", "狀態", "借出日期", "預計歸還", "實際歸還", "核准人", "備註",
 	}
-	for _, cl := range checklistLabels {
-		headers = append(headers, "歸還清點-"+cl[1])
+	for _, k := range checklistKeys {
+		label := k
+		if it, ok := itemMeta[k]; ok && it.Label != "" {
+			label = it.Label
+		}
+		headers = append(headers, "歸還清點-"+label)
 	}
 	headers = append(headers, "歸還備註", "存查")
 
@@ -919,18 +997,13 @@ func (c *RentalController) handleExport(w http.ResponseWriter, r *http.Request) 
 			rl.Notes,
 		}
 
-		// Checklist columns
+		// Checklist columns — rendered per the item's resolved type where
+		// known (boolean → "V" when true, number appends its unit, location
+		// prints an address or "lat,lng", photo prints an item count),
+		// falling back to a plain string print for anything else/unresolved.
 		cl := rl.ReturnChecklist
-		for _, pair := range checklistLabels {
-			v := ""
-			if cl != nil {
-				if b, ok := cl[pair[0]]; ok {
-					if bv, ok := b.(bool); ok && bv {
-						v = "V"
-					}
-				}
-			}
-			vals = append(vals, v)
+		for _, k := range checklistKeys {
+			vals = append(vals, formatChecklistValue(itemMeta[k], cl[k]))
 		}
 
 		// Return notes + archived

@@ -8,17 +8,26 @@ import { useDialog } from "../components/DialogProvider";
 import {
   Check, X, RotateCcw, Play, UserPlus, Clock,
   CheckCircle, AlertCircle, ArrowRight, FileDown, Archive, Plus, Trash2, Gauge,
+  MapPin, Camera,
 } from "lucide-react";
 import type { ColDef, ICellRendererParams } from "ag-grid-enterprise";
 import { DataGrid } from "../components/DataGrid";
 
-interface ReturnChecklist {
-  deviceReceived?: boolean;
-  screenOk?: boolean;
-  bodyOk?: boolean;
-  canPowerOn?: boolean;
-  accessoriesOk?: boolean;
+// Dynamic checklist item, resolved from the category-bound templates
+// maintained in Categories.tsx (Phase 2a). Mirrors the backend's
+// domain.ChecklistItem.
+type ChecklistItemType = "boolean" | "text" | "number" | "location" | "photo";
+
+interface ChecklistItem {
+  key: string;
+  label: string;
+  type: ChecklistItemType;
+  required: boolean;
+  unit?: string;
+  maxCount?: number;
 }
+
+type ChecklistAnswers = Record<string, unknown>;
 
 interface Rental {
   id: string;
@@ -42,7 +51,8 @@ interface Rental {
   device_serial: string;
   rental_number: number;
   is_archived: boolean;
-  return_checklist?: ReturnChecklist;
+  category_id?: string | null;
+  return_checklist?: ChecklistAnswers;
   return_notes?: string;
   multi_day_reason?: string;
   daily_tracking_required?: boolean;
@@ -62,7 +72,7 @@ interface RentalGroup {
   is_archived: boolean;
   custodian_name: string;
   custodian_id?: string;
-  return_checklist?: ReturnChecklist;
+  return_checklist?: ChecklistAnswers;
   return_notes?: string;
   multi_day_reason?: string;
   daily_tracking_required?: boolean;
@@ -144,6 +154,160 @@ async function downloadExportExcel(ids?: string[]) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+function isChecklistItemFilled(item: ChecklistItem, value: unknown): boolean {
+  if (!item.required) return true;
+  switch (item.type) {
+    case "boolean": return value === true;
+    case "photo": return Array.isArray(value) && value.length > 0;
+    case "location": return !!value && typeof value === "object";
+    case "number": return value !== undefined && value !== null && value !== "";
+    case "text": default: return typeof value === "string" && value.trim() !== "";
+  }
+}
+
+// Downscales an image client-side before upload (long edge capped at
+// maxDim, re-encoded as JPEG) — a phone camera photo straight off the
+// sensor can be 5-10MB, which would otherwise land directly in the
+// database via checklist_photos. Falls back to the original file if
+// anything about the canvas path fails.
+function resizeImage(file: File, maxDim: number): Promise<Blob> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        const scale = maxDim / Math.max(width, height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { resolve(file); return; }
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob) => resolve(blob || file), "image/jpeg", 0.85);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+    img.src = url;
+  });
+}
+
+function ChecklistLocationField({ item, value, onChange }: {
+  item: ChecklistItem;
+  value: unknown;
+  onChange: (v: unknown) => void;
+}) {
+  const [manual, setManual] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const v = value as { lat?: number; lng?: number; address?: string } | undefined;
+
+  const capture = () => {
+    setBusy(true);
+    if (!navigator.geolocation) { setManual(true); setBusy(false); return; }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        onChange({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy, capturedAt: new Date().toISOString() });
+        setBusy(false);
+      },
+      () => { setManual(true); setBusy(false); },
+      { enableHighAccuracy: true, timeout: 10000 },
+    );
+  };
+
+  return (
+    <div className="form-control">
+      <label className="label">
+        <span className="label-text text-sm">{item.label}{item.required && <span className="text-error"> *</span>}</span>
+      </label>
+      {v?.lat != null ? (
+        <div className="flex items-center gap-2 text-sm flex-wrap">
+          <MapPin size={14} className="text-success" />
+          <a className="link link-primary" target="_blank" rel="noreferrer" href={`https://maps.google.com/?q=${v.lat},${v.lng}`}>
+            已定位（開啟地圖）
+          </a>
+          <button type="button" className="btn btn-ghost btn-xs" onClick={capture}>重新定位</button>
+        </div>
+      ) : manual ? (
+        <input
+          type="text"
+          className="input input-bordered input-sm"
+          placeholder="手動輸入地址"
+          value={v?.address || ""}
+          onChange={(e) => onChange({ address: e.target.value })}
+        />
+      ) : (
+        <div className="flex items-center gap-2">
+          <button type="button" className="btn btn-outline btn-sm gap-1" disabled={busy} onClick={capture}>
+            {busy ? <span className="loading loading-spinner loading-xs" /> : <MapPin size={14} />} 取得目前位置
+          </button>
+          <button type="button" className="btn btn-link btn-xs" onClick={() => setManual(true)}>改用手動輸入地址</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChecklistPhotoField({ item, rentalNumber, value, onChange }: {
+  item: ChecklistItem;
+  rentalNumber: number;
+  value: unknown;
+  onChange: (v: string[]) => void;
+}) {
+  const [uploading, setUploading] = useState(false);
+  const ids = Array.isArray(value) ? (value as string[]) : [];
+  const max = item.maxCount || 0;
+
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setUploading(true);
+    try {
+      const resized = await resizeImage(file, 1600);
+      const form = new FormData();
+      form.append("file", resized, file.name || "photo.jpg");
+      form.append("rental_number", String(rentalNumber));
+      form.append("item_key", item.key);
+      const { data } = await apiClient.post("/api/checklist-photos", form, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      onChange([...ids, data.id]);
+    } catch { /* best-effort — user can just try uploading again */ }
+    finally { setUploading(false); }
+  };
+
+  return (
+    <div className="form-control">
+      <label className="label">
+        <span className="label-text text-sm">{item.label}{item.required && <span className="text-error"> *</span>}</span>
+      </label>
+      <div className="flex flex-wrap gap-2 items-center">
+        {ids.map((id) => (
+          <div key={id} className="relative">
+            <img src={`/api/checklist-photos/${id}`} alt="" className="w-16 h-16 object-cover rounded border border-base-300" />
+            <button
+              type="button"
+              className="btn btn-error btn-xs btn-circle absolute -top-2 -right-2"
+              onClick={() => onChange(ids.filter((existing) => existing !== id))}
+            >
+              <X size={10} />
+            </button>
+          </div>
+        ))}
+        {(max === 0 || ids.length < max) && (
+          <label className="btn btn-outline btn-sm gap-1 cursor-pointer">
+            {uploading ? <span className="loading loading-spinner loading-xs" /> : <Camera size={14} />} 拍照/上傳
+            <input type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFile} disabled={uploading} />
+          </label>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function Rentals() {
@@ -254,18 +418,31 @@ export function Rentals() {
     } finally { setCreating(false); }
   };
 
-  // Return dialog state
-  const [returnRentalId, setReturnRentalId] = useState<string | null>(null);
-  const [checklist, setChecklist] = useState({
-    deviceReceived: false,
-    screenOk: false,
-    bodyOk: false,
-    canPowerOn: false,
-    accessoriesOk: false,
-  });
+  // Return dialog state — checklist items are resolved dynamically per the
+  // batch's asset categories (Phase 2a), replacing the previous hardcoded 5.
+  const [returnGroup, setReturnGroup] = useState<RentalGroup | null>(null);
+  const [returnItems, setReturnItems] = useState<ChecklistItem[]>([]);
+  const [returnItemsLoading, setReturnItemsLoading] = useState(false);
+  const [returnValues, setReturnValues] = useState<ChecklistAnswers>({});
   const [returnNotes, setReturnNotes] = useState("");
 
-  const allChecked = Object.values(checklist).every(Boolean);
+  const allRequiredFilled = returnItems.every((item) => isChecklistItemFilled(item, returnValues[item.key]));
+
+  const openReturnDialog = async (group: RentalGroup) => {
+    setReturnGroup(group);
+    setReturnValues({});
+    setReturnNotes("");
+    setReturnItemsLoading(true);
+    try {
+      const categoryIds = Array.from(new Set(group.rentals.map((rl) => rl.category_id).filter((v): v is string => !!v)));
+      const { data } = await apiClient.get("/api/checklist-templates/resolve", {
+        params: { category_ids: categoryIds.join(",") },
+      });
+      setReturnItems(data.items || []);
+    } catch {
+      setReturnItems([]);
+    } finally { setReturnItemsLoading(false); }
+  };
 
   // Daily report dialog (逐日追蹤分類：每日回報，跟歸還是分開的動作)
   const [dailyReportGroup, setDailyReportGroup] = useState<RentalGroup | null>(null);
@@ -312,12 +489,6 @@ export function Rentals() {
   };
 
   const doAction = async (rentalId: string, action: string) => {
-    if (action === "return") {
-      setReturnRentalId(rentalId);
-      setChecklist({ deviceReceived: false, screenOk: false, bodyOk: false, canPowerOn: false, accessoriesOk: false });
-      setReturnNotes("");
-      return;
-    }
     const labels: Record<string, string> = {
       approve: "核准此租借申請（整批）？",
       activate: "確認借出裝置（整批）？",
@@ -333,13 +504,13 @@ export function Rentals() {
   };
 
   const confirmReturn = async () => {
-    if (!returnRentalId) return;
+    if (!returnGroup) return;
     try {
-      await apiClient.post(`/api/rentals/${returnRentalId}/return`, {
+      await apiClient.post(`/api/rentals/${returnGroup.rentals[0].id}/return`, {
         notes: returnNotes,
-        checklist,
+        checklist: returnValues,
       });
-      setReturnRentalId(null);
+      setReturnGroup(null);
       loadRentals();
     } catch (err) {
       await dialog.error("歸還失敗: " + (err instanceof Error ? err.message : ""));
@@ -510,7 +681,7 @@ export function Rentals() {
               <button onClick={() => doAction(firstRentalId, "activate")} className="btn btn-primary btn-xs gap-1"><Play size={12} /> 借出</button>
             )}
             {g.status === "active" && canApprove(g) && (
-              <button onClick={() => doAction(firstRentalId, "return")} className="btn btn-warning btn-xs gap-1"><RotateCcw size={12} /> 歸還</button>
+              <button onClick={() => openReturnDialog(g)} className="btn btn-warning btn-xs gap-1"><RotateCcw size={12} /> 歸還</button>
             )}
             {g.status === "active" && g.daily_tracking_required && (isAdmin || g.borrower_id === user?.id) && (
               <button onClick={() => openDailyReport(g)} className="btn btn-outline btn-xs gap-1"><Gauge size={12} /> 每日回報</button>
@@ -781,31 +952,66 @@ export function Rentals() {
           getRowClass={(p) => p.data?.is_archived ? "opacity-50" : ""}
         />
       </div>
-      {/* Return checklist dialog */}
-      <dialog className={`modal ${returnRentalId ? "modal-open" : ""}`}>
+      {/* Return checklist dialog — items resolved dynamically per分類 (Phase 2a) */}
+      <dialog className={`modal ${returnGroup ? "modal-open" : ""}`}>
         <div className="modal-box">
           <h3 className="font-bold text-lg">裝置歸還清點</h3>
           <p className="text-sm text-base-content/60 mt-1">請確認以下項目後完成歸還（整批裝置）</p>
 
-          <div className="space-y-3 mt-4">
-            {[
-              { key: "deviceReceived" as const, label: "已收到裝置" },
-              { key: "screenOk" as const, label: "螢幕完好（無刮傷、裂痕）" },
-              { key: "bodyOk" as const, label: "機身完好（無凹損、變形）" },
-              { key: "canPowerOn" as const, label: "可正常開機使用" },
-              { key: "accessoriesOk" as const, label: "配件齊全（充電線、保護套等）" },
-            ].map((item) => (
-              <label key={item.key} className="flex items-center gap-3 cursor-pointer p-2 rounded hover:bg-base-200">
-                <input
-                  type="checkbox"
-                  className="checkbox checkbox-sm checkbox-success"
-                  checked={checklist[item.key]}
-                  onChange={(e) => setChecklist({ ...checklist, [item.key]: e.target.checked })}
-                />
-                <span className="text-sm">{item.label}</span>
-              </label>
-            ))}
-          </div>
+          {returnItemsLoading ? (
+            <div className="flex justify-center py-8"><span className="loading loading-spinner"></span></div>
+          ) : returnItems.length === 0 ? (
+            <p className="text-sm text-base-content/50 py-4 text-center">此分類沒有設定歸還清點項目</p>
+          ) : (
+            <div className="space-y-3 mt-4">
+              {returnItems.map((item) => {
+                const value = returnValues[item.key];
+                const setValue = (v: unknown) => setReturnValues((prev) => ({ ...prev, [item.key]: v }));
+                if (item.type === "boolean") {
+                  return (
+                    <label key={item.key} className="flex items-center gap-3 cursor-pointer p-2 rounded hover:bg-base-200">
+                      <input
+                        type="checkbox"
+                        className="checkbox checkbox-sm checkbox-success"
+                        checked={value === true}
+                        onChange={(e) => setValue(e.target.checked)}
+                      />
+                      <span className="text-sm">{item.label}{item.required && <span className="text-error"> *</span>}</span>
+                    </label>
+                  );
+                }
+                if (item.type === "text") {
+                  return (
+                    <div key={item.key} className="form-control">
+                      <label className="label"><span className="label-text text-sm">{item.label}{item.required && <span className="text-error"> *</span>}</span></label>
+                      <input type="text" className="input input-bordered input-sm" value={(value as string) || ""} onChange={(e) => setValue(e.target.value)} />
+                    </div>
+                  );
+                }
+                if (item.type === "number") {
+                  return (
+                    <div key={item.key} className="form-control">
+                      <label className="label">
+                        <span className="label-text text-sm">{item.label}{item.unit ? `（${item.unit}）` : ""}{item.required && <span className="text-error"> *</span>}</span>
+                      </label>
+                      <input
+                        type="number"
+                        className="input input-bordered input-sm"
+                        value={value === undefined || value === null ? "" : (value as number)}
+                        onChange={(e) => setValue(e.target.value === "" ? "" : Number(e.target.value))}
+                      />
+                    </div>
+                  );
+                }
+                if (item.type === "location") {
+                  return <ChecklistLocationField key={item.key} item={item} value={value} onChange={setValue} />;
+                }
+                return (
+                  <ChecklistPhotoField key={item.key} item={item} rentalNumber={returnGroup!.rental_number} value={value} onChange={setValue} />
+                );
+              })}
+            </div>
+          )}
 
           <div className="form-control mt-4">
             <label className="label"><span className="label-text text-sm">備註（選填）</span></label>
@@ -818,21 +1024,21 @@ export function Rentals() {
             />
           </div>
 
-          {!allChecked && (
+          {!allRequiredFilled && (
             <div role="alert" className="alert alert-warning mt-4 py-2">
-              <span className="text-sm">請完成所有清點項目</span>
+              <span className="text-sm">請完成所有必填清點項目</span>
             </div>
           )}
 
           <div className="modal-action">
-            <button className="btn btn-sm" onClick={() => setReturnRentalId(null)}>取消</button>
-            <button className="btn btn-warning btn-sm gap-1" disabled={!allChecked} onClick={confirmReturn}>
+            <button className="btn btn-sm" onClick={() => setReturnGroup(null)}>取消</button>
+            <button className="btn btn-warning btn-sm gap-1" disabled={!allRequiredFilled} onClick={confirmReturn}>
               <RotateCcw size={14} /> 確認歸還
             </button>
           </div>
         </div>
         <form method="dialog" className="modal-backdrop">
-          <button onClick={() => setReturnRentalId(null)}>close</button>
+          <button onClick={() => setReturnGroup(null)}>close</button>
         </form>
       </dialog>
 

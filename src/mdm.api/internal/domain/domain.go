@@ -265,6 +265,53 @@ type RentalDailyReport struct {
 	ReportedAt     time.Time
 }
 
+// ChecklistItem is one field of a dynamic return-checklist template.
+// Type determines how the frontend renders it and what shape its answer
+// takes in a rentals.return_checklist / RentalDailyReport.Checklist blob:
+//   - "boolean": a checkbox; answer is true/false.
+//   - "text": a free-text input; answer is a string.
+//   - "number": a numeric input; answer is a number. Unit is display-only
+//     (e.g. "km").
+//   - "location": a "capture current position" button (browser Geolocation
+//     API); answer is {"lat":..,"lng":..,"accuracy":..} or, if geolocation
+//     failed/was denied, a manually-typed {"address":".."}.
+//   - "photo": a camera/file-upload button; answer is an array of
+//     ChecklistPhoto IDs. MaxCount caps how many (0 = unlimited).
+type ChecklistItem struct {
+	Key      string `json:"key"`
+	Label    string `json:"label"`
+	Type     string `json:"type"`
+	Required bool   `json:"required"`
+	Unit     string `json:"unit,omitempty"`
+	MaxCount int    `json:"maxCount,omitempty"`
+}
+
+// ChecklistTemplate is a category-bound (or, when CategoryID is nil, the
+// global default) ordered list of ChecklistItem. Resolved via the same
+// "walk up categories.parent_id, first explicit row wins, else fall through
+// to the global default" inheritance as CategoryRentalRule.
+type ChecklistTemplate struct {
+	ID         string
+	CategoryID *string
+	Items      []ChecklistItem
+	UpdatedBy  *string
+	UpdatedAt  time.Time
+}
+
+// ChecklistPhoto is the binary content behind one "photo" type checklist
+// answer. See checklist_photos migration comment for why it's keyed by
+// RentalNumber rather than a single Rental row's ID.
+type ChecklistPhoto struct {
+	ID           string
+	RentalNumber int
+	ItemKey      string
+	Content      []byte
+	ContentType  string
+	Size         int
+	UploadedBy   *string
+	CreatedAt    time.Time
+}
+
 // --- Maintenance (Equipment dispatch) Management ---
 
 // MaintenanceRequest is one asset line of a 資通設備進出及維護申請單.
