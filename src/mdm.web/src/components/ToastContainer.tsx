@@ -2,7 +2,13 @@ import { useEventStore } from "../stores/eventStore";
 import { X, CheckCircle, AlertCircle, Info } from "lucide-react";
 
 export function ToastContainer() {
-  const { toasts, dismissToast } = useEventStore();
+  // Selectors, not a whole-store destructure — same reasoning as Layout.tsx:
+  // this is mounted at the app root, and a bare useEventStore() would
+  // re-render it (harmlessly here, since it early-returns, but still real
+  // render work) on every single incoming MDM event, not just when toasts
+  // actually change.
+  const toasts = useEventStore((s) => s.toasts);
+  const dismissToast = useEventStore((s) => s.dismissToast);
 
   if (toasts.length === 0) return null;
 
