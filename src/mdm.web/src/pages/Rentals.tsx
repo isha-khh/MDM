@@ -7,7 +7,7 @@ import apiClient from "../lib/apiClient";
 import { useDialog } from "../components/DialogProvider";
 import {
   Check, X, RotateCcw, Play, UserPlus, Clock,
-  CheckCircle, AlertCircle, ArrowRight, FileDown, Archive, Plus, Trash2,
+  CheckCircle, AlertCircle, ArrowRight, FileDown, Archive, Plus, Trash2, Gauge,
 } from "lucide-react";
 import type { ColDef, ICellRendererParams } from "ag-grid-enterprise";
 import { DataGrid } from "../components/DataGrid";
@@ -44,11 +44,14 @@ interface Rental {
   is_archived: boolean;
   return_checklist?: ReturnChecklist;
   return_notes?: string;
+  multi_day_reason?: string;
+  daily_tracking_required?: boolean;
 }
 
 interface RentalGroup {
   rental_number: number;
   rentals: Rental[];
+  borrower_id: string;
   borrower_name: string;
   purpose: string;
   status: string;
@@ -61,6 +64,16 @@ interface RentalGroup {
   custodian_id?: string;
   return_checklist?: ReturnChecklist;
   return_notes?: string;
+  multi_day_reason?: string;
+  daily_tracking_required?: boolean;
+}
+
+interface DailyReport {
+  id: string;
+  report_date: string;
+  checklist: Record<string, unknown>;
+  backfill_reason: string;
+  reported_at: string;
 }
 
 interface UserOption {
@@ -90,6 +103,7 @@ function groupByRentalNumber(rentals: Rental[]): RentalGroup[] {
     groups.push({
       rental_number: num,
       rentals: items,
+      borrower_id: first.borrower_id,
       borrower_name: first.borrower_name,
       purpose: first.purpose,
       status: first.status,
@@ -102,6 +116,10 @@ function groupByRentalNumber(rentals: Rental[]): RentalGroup[] {
       custodian_id: first.custodian_id,
       return_checklist: first.return_checklist,
       return_notes: first.return_notes,
+      multi_day_reason: first.multi_day_reason,
+      // Union across the batch, matching the backend's own union policy for
+      // "does this batch touch any daily-tracking category".
+      daily_tracking_required: items.some((it) => it.daily_tracking_required),
     });
   }
   groups.sort((a, b) => b.rental_number - a.rental_number);
@@ -145,9 +163,12 @@ export function Rentals() {
   const [selectedNumbers, setSelectedNumbers] = useState<Set<number>>(new Set());
 
   // Create form — shared
+  const todayStr = () => new Date().toISOString().slice(0, 10);
   const [borrowerId, setBorrowerId] = useState("");
   const [purpose, setPurpose] = useState("");
+  const [borrowDate, setBorrowDate] = useState(todayStr());
   const [expectedReturn, setExpectedReturn] = useState("");
+  const [multiDayReason, setMultiDayReason] = useState("");
   const [notes, setNotes] = useState("");
   const [creating, setCreating] = useState(false);
   // Asset mode
@@ -190,32 +211,38 @@ export function Rentals() {
     setSelectedAssets([]);
     setBorrowerId("");
     setPurpose("");
+    setBorrowDate(todayStr());
     setExpectedReturn("");
+    setMultiDayReason("");
     setNotes("");
     setCatLines([{ categoryId: "", quantity: 1 }]);
   };
 
+  // Multi-day rentals (borrow_date ≠ expected_return) may require a reason —
+  // enforced server-side only for "逐日追蹤" categories (e.g. vehicles), but
+  // shown proactively here so the user isn't surprised by a rejected submit.
+  const isMultiDay = !!expectedReturn && expectedReturn !== borrowDate;
+
   const handleCreate = async () => {
     setCreating(true);
     try {
+      const common = {
+        borrower_id: borrowerId,
+        purpose,
+        borrow_date: borrowDate || null,
+        expected_return: expectedReturn || null,
+        multi_day_reason: multiDayReason,
+        notes,
+      };
       if (createTab === "asset") {
         if (!borrowerId || selectedAssets.length === 0) return;
-        await apiClient.post("/api/rentals", {
-          asset_ids: selectedAssets,
-          borrower_id: borrowerId,
-          purpose,
-          expected_return: expectedReturn || null,
-          notes,
-        });
+        await apiClient.post("/api/rentals", { asset_ids: selectedAssets, ...common });
       } else {
         const validLines = catLines.filter((l) => l.categoryId && l.quantity >= 1);
         if (!borrowerId || validLines.length === 0) return;
         await apiClient.post("/api/rentals", {
           category_lines: validLines.map((l) => ({ category_id: l.categoryId, quantity: l.quantity })),
-          borrower_id: borrowerId,
-          purpose,
-          expected_return: expectedReturn || null,
-          notes,
+          ...common,
         });
       }
       setShowCreate(false);
@@ -239,6 +266,50 @@ export function Rentals() {
   const [returnNotes, setReturnNotes] = useState("");
 
   const allChecked = Object.values(checklist).every(Boolean);
+
+  // Daily report dialog (逐日追蹤分類：每日回報，跟歸還是分開的動作)
+  const [dailyReportGroup, setDailyReportGroup] = useState<RentalGroup | null>(null);
+  const [dailyReportDate, setDailyReportDate] = useState("");
+  const [dailyReportMileage, setDailyReportMileage] = useState("");
+  const [dailyReportBackfillReason, setDailyReportBackfillReason] = useState("");
+  const [dailyReportExistingDates, setDailyReportExistingDates] = useState<string[]>([]);
+  const [dailyReportSubmitting, setDailyReportSubmitting] = useState(false);
+
+  const isDailyReportBackfill = dailyReportDate !== "" && dailyReportDate !== todayStr();
+
+  const openDailyReport = async (group: RentalGroup) => {
+    const rentalId = group.rentals[0].id;
+    let existingDates: string[] = [];
+    try {
+      const { data } = await apiClient.get(`/api/rentals/${rentalId}/daily-reports`);
+      existingDates = (data.reports as DailyReport[] || []).map((r) => r.report_date);
+    } catch { /* best-effort — an empty list just means no prior reports fetched */ }
+    setDailyReportExistingDates(existingDates);
+    setDailyReportGroup(group);
+    setDailyReportMileage("");
+    setDailyReportBackfillReason("");
+    // Default to today unless it's already covered, in which case default to
+    // blank so the user has to deliberately pick a missed day to backfill.
+    setDailyReportDate(existingDates.includes(todayStr()) ? "" : todayStr());
+  };
+
+  const confirmDailyReport = async () => {
+    if (!dailyReportGroup || !dailyReportDate) return;
+    setDailyReportSubmitting(true);
+    try {
+      const body: Record<string, unknown> = { checklist: { mileage: dailyReportMileage ? Number(dailyReportMileage) : null } };
+      if (isDailyReportBackfill) {
+        body.report_date = dailyReportDate;
+        body.backfill_reason = dailyReportBackfillReason;
+      }
+      await apiClient.post(`/api/rentals/${dailyReportGroup.rentals[0].id}/daily-report`, body);
+      setDailyReportGroup(null);
+      loadRentals();
+    } catch (err: unknown) {
+      const resp = (err as { response?: { data?: { error?: string } } })?.response?.data;
+      await dialog.error(resp?.error || (err instanceof Error ? err.message : "回報失敗"));
+    } finally { setDailyReportSubmitting(false); }
+  };
 
   const doAction = async (rentalId: string, action: string) => {
     if (action === "return") {
@@ -441,6 +512,9 @@ export function Rentals() {
             {g.status === "active" && canApprove(g) && (
               <button onClick={() => doAction(firstRentalId, "return")} className="btn btn-warning btn-xs gap-1"><RotateCcw size={12} /> 歸還</button>
             )}
+            {g.status === "active" && g.daily_tracking_required && (isAdmin || g.borrower_id === user?.id) && (
+              <button onClick={() => openDailyReport(g)} className="btn btn-outline btn-xs gap-1"><Gauge size={12} /> 每日回報</button>
+            )}
           </div>
         );
       },
@@ -612,6 +686,10 @@ export function Rentals() {
                   )}
                 </div>
                 <div className="form-control">
+                  <label className="label"><span className="label-text font-medium">借出日期</span></label>
+                  <input type="date" value={borrowDate} onChange={(e) => setBorrowDate(e.target.value)} className="input input-bordered input-sm" />
+                </div>
+                <div className="form-control">
                   <label className="label"><span className="label-text font-medium">預計歸還日期</span></label>
                   <input type="date" value={expectedReturn} onChange={(e) => setExpectedReturn(e.target.value)} className="input input-bordered input-sm" />
                 </div>
@@ -623,6 +701,21 @@ export function Rentals() {
                   <label className="label"><span className="label-text font-medium">備註</span></label>
                   <input type="text" value={notes} onChange={(e) => setNotes(e.target.value)} className="input input-bordered input-sm" placeholder="其他備註" />
                 </div>
+                {isMultiDay && (
+                  <div className="form-control sm:col-span-2">
+                    <label className="label">
+                      <span className="label-text font-medium">跨日說明</span>
+                      <span className="label-text-alt opacity-60">車輛等逐日追蹤分類的跨日租借必填，其他分類可留空</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={multiDayReason}
+                      onChange={(e) => setMultiDayReason(e.target.value)}
+                      className="input input-bordered input-sm"
+                      placeholder="例如：出差 3 天"
+                    />
+                  </div>
+                )}
               </div>
               <div className="flex gap-2">
                 <button
@@ -740,6 +833,80 @@ export function Rentals() {
         </div>
         <form method="dialog" className="modal-backdrop">
           <button onClick={() => setReturnRentalId(null)}>close</button>
+        </form>
+      </dialog>
+
+      {/* Daily report dialog（逐日追蹤分類） */}
+      <dialog className={`modal ${dailyReportGroup ? "modal-open" : ""}`}>
+        <div className="modal-box">
+          <h3 className="font-bold text-lg">每日回報</h3>
+          <p className="text-sm text-base-content/60 mt-1">
+            單號 {dailyReportGroup?.rental_number}，記錄今天（或補登遺漏的一天）的里程
+          </p>
+
+          <div className="form-control mt-4">
+            <label className="label"><span className="label-text text-sm">回報日期</span></label>
+            <select
+              value={dailyReportDate}
+              onChange={(e) => setDailyReportDate(e.target.value)}
+              className="select select-bordered select-sm"
+            >
+              {!dailyReportExistingDates.includes(todayStr()) && (
+                <option value={todayStr()}>今天（{todayStr()}）</option>
+              )}
+              <option value="" disabled>— 或補登遺漏的一天 —</option>
+              {dailyReportGroup && dailyReportGroup.borrow_date && (() => {
+                const start = new Date(dailyReportGroup.borrow_date);
+                const end = dailyReportGroup.expected_return ? new Date(dailyReportGroup.expected_return) : new Date();
+                const today = todayStr();
+                const options: string[] = [];
+                for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+                  const s = d.toISOString().slice(0, 10);
+                  if (s < today && !dailyReportExistingDates.includes(s)) options.push(s);
+                }
+                return options.map((s) => <option key={s} value={s}>補登 {s}</option>);
+              })()}
+            </select>
+          </div>
+
+          <div className="form-control mt-3">
+            <label className="label"><span className="label-text text-sm">里程數（km）</span></label>
+            <input
+              type="number"
+              value={dailyReportMileage}
+              onChange={(e) => setDailyReportMileage(e.target.value)}
+              className="input input-bordered input-sm"
+              placeholder="例如：12345"
+            />
+          </div>
+
+          {isDailyReportBackfill && (
+            <div className="form-control mt-3">
+              <label className="label"><span className="label-text text-sm">補登原因（必填）</span></label>
+              <textarea
+                value={dailyReportBackfillReason}
+                onChange={(e) => setDailyReportBackfillReason(e.target.value)}
+                placeholder="例如：忘記填，事後回想"
+                className="textarea textarea-bordered textarea-sm"
+                rows={2}
+              />
+            </div>
+          )}
+
+          <div className="modal-action">
+            <button className="btn btn-sm" onClick={() => setDailyReportGroup(null)}>取消</button>
+            <button
+              className="btn btn-primary btn-sm gap-1"
+              disabled={dailyReportSubmitting || !dailyReportDate || (isDailyReportBackfill && !dailyReportBackfillReason.trim())}
+              onClick={confirmDailyReport}
+            >
+              {dailyReportSubmitting && <span className="loading loading-spinner loading-xs"></span>}
+              <Gauge size={14} /> 送出回報
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop">
+          <button onClick={() => setDailyReportGroup(null)}>close</button>
         </form>
       </dialog>
     </div>

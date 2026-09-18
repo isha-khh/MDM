@@ -220,13 +220,49 @@ type Rental struct {
 	IsArchived      bool
 	ReturnChecklist map[string]interface{}
 	ReturnNotes     string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// MultiDayReason is the required justification when the rental spans more
+	// than one calendar day AND at least one involved asset's category is
+	// flagged daily_tracking_required (see CategoryRentalRule) — e.g. a
+	// multi-day vehicle trip. Empty for ordinary single-day rentals.
+	MultiDayReason string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 	// Joined fields (read-only)
 	DeviceName   string
 	DeviceSerial string
 	AssetNumber  string
 	AssetName    string
+	CategoryID   *string
+}
+
+// CategoryRentalRule is a per-category opt-in for "daily tracking": a rental
+// spanning multiple days needs a reason (Rental.MultiDayReason), and the
+// borrower is expected to file one RentalDailyReport per day rather than a
+// single report at final return. Resolved with the same "walk up
+// categories.parent_id, first explicit row wins" inheritance that
+// checklist_templates/category_notices reuse in a later phase — a category
+// with no row here (at any ancestor) is simply not subject to the rule.
+type CategoryRentalRule struct {
+	CategoryID            string
+	DailyTrackingRequired bool
+	UpdatedBy             *string
+	UpdatedAt             time.Time
+}
+
+// RentalDailyReport is one day's checklist for a daily_tracking_required
+// rental (e.g. a day's odometer reading). Keyed by RentalNumber rather than a
+// single Rental row's ID because rental actions operate on the whole batch
+// sharing a rental_number, matching RentalRepo's *ByNumber methods.
+// BackfillReason is non-empty when this was filed after the fact (the
+// borrower forgot to report on ReportDate itself) rather than in real time.
+type RentalDailyReport struct {
+	ID             string
+	RentalNumber   int
+	ReportDate     time.Time
+	Checklist      map[string]interface{}
+	BackfillReason string
+	ReportedBy     *string
+	ReportedAt     time.Time
 }
 
 // --- Maintenance (Equipment dispatch) Management ---

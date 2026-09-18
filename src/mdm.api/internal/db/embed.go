@@ -82,3 +82,6 @@ var Migration026SQL string
 
 //go:embed migrations/027_mail_settings_tls.up.sql
 var Migration027SQL string
+
+//go:embed migrations/028_category_rental_rules.up.sql
+var Migration028SQL string

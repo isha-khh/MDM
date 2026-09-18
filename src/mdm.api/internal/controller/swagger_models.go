@@ -165,11 +165,25 @@ type swagAssetBatchUpdateReq struct {
 // -- Rental --
 
 type swagRentalReq struct {
-	DeviceUdids    []string `json:"device_udids"`
-	BorrowerID     string   `json:"borrower_id"`
-	Purpose        string   `json:"purpose"`
-	ExpectedReturn *string  `json:"expected_return" example:"2025-12-31"`
-	Notes          string   `json:"notes"`
+	DeviceUdids []string `json:"device_udids"`
+	BorrowerID  string   `json:"borrower_id"`
+	Purpose     string   `json:"purpose"`
+	BorrowDate  *string  `json:"borrow_date" example:"2025-12-01"`
+	// MultiDayReason is required when the booking spans more than one day AND
+	// touches a category flagged daily_tracking_required (e.g. a vehicle).
+	MultiDayReason string  `json:"multi_day_reason"`
+	ExpectedReturn *string `json:"expected_return" example:"2025-12-31"`
+	Notes          string  `json:"notes"`
+}
+
+// swagDailyReportReq is the body for POST /api/rentals/{id}/daily-report.
+type swagDailyReportReq struct {
+	Checklist map[string]interface{} `json:"checklist"`
+	// ReportDate backfills a past day (must be within the rental's date
+	// range and not already reported); omit it to report for today.
+	ReportDate *string `json:"report_date" example:"2025-12-02"`
+	// BackfillReason is required whenever ReportDate is set.
+	BackfillReason string `json:"backfill_reason"`
 }
 
 type swagRentalCreateResp struct {
@@ -235,8 +249,8 @@ type swagDisposalItemReq struct {
 }
 
 type swagDisposalReq struct {
-	ApplicantID string                 `json:"applicant_id"`
-	Items       []swagDisposalItemReq  `json:"items"`
+	ApplicantID string                `json:"applicant_id"`
+	Items       []swagDisposalItemReq `json:"items"`
 }
 
 type swagDisposalCreateResp struct {

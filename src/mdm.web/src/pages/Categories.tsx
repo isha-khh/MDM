@@ -23,16 +23,43 @@ export function Categories() {
   const [addName, setAddName] = useState("");
   const [saving, setSaving] = useState(false);
 
+  // 逐日追蹤規則（僅葉節點分類適用；跨日租借需說明、期間每天各填一份 checklist，
+  // 用於車輛里程等記錄）。以 category_id 為 key，值 = daily_tracking_required。
+  const [rentalRules, setRentalRules] = useState<Record<string, boolean>>({});
+  const [savingRuleId, setSavingRuleId] = useState<string | null>(null);
+
+  const loadRentalRules = async (cats: Category[]) => {
+    const leafIds = cats.filter((c) => !cats.some((child) => child.parent_id === c.id)).map((c) => c.id);
+    const entries = await Promise.all(leafIds.map(async (id): Promise<[string, boolean]> => {
+      try {
+        const { data } = await apiClient.get(`/api/categories/${id}/rental-rule`);
+        return [id, !!data.daily_tracking_required];
+      } catch { return [id, false]; }
+    }));
+    setRentalRules(Object.fromEntries(entries));
+  };
+
   const load = async () => {
     setLoading(true);
     try {
       const { data } = await apiClient.get("/api/categories");
-      setCategories(data.categories || []);
+      const cats: Category[] = data.categories || [];
+      setCategories(cats);
+      loadRentalRules(cats);
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
   };
 
   useEffect(() => { load(); }, []);
+
+  const toggleDailyTracking = async (id: string, value: boolean) => {
+    setSavingRuleId(id);
+    try {
+      await apiClient.put(`/api/categories/${id}/rental-rule`, { daily_tracking_required: value });
+      setRentalRules((prev) => ({ ...prev, [id]: value }));
+    } catch { await dialog.error("設定失敗"); }
+    finally { setSavingRuleId(null); }
+  };
 
   // Build tree structure for rendering
   const tree = useMemo(() => {
@@ -109,6 +136,21 @@ export function Categories() {
               <span className={`flex-1 text-sm ${depth === 0 ? "font-bold" : depth === 1 ? "font-medium" : ""}`}>
                 {cat.name}
               </span>
+              {children.length === 0 && (
+                <label
+                  className="flex items-center gap-1 text-xs opacity-70 cursor-pointer whitespace-nowrap"
+                  title="開啟後：跨日租借需填寫說明，且租借期間每天各自要填一份檢查清單（例如車輛里程），用於逐日記錄"
+                >
+                  <input
+                    type="checkbox"
+                    className="toggle toggle-xs"
+                    checked={!!rentalRules[cat.id]}
+                    disabled={savingRuleId === cat.id}
+                    onChange={(e) => toggleDailyTracking(cat.id, e.target.checked)}
+                  />
+                  逐日追蹤
+                </label>
+              )}
               <div className="opacity-0 group-hover:opacity-100 flex gap-0.5 transition-opacity">
                 <button onClick={() => { setAddParentId(cat.id); setAddName(""); }} className="btn btn-ghost btn-xs" title="新增子分類">
                   <Plus size={12} />

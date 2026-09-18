@@ -2,21 +2,26 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/anthropics/mdm-server/internal/adapter/postgres"
 	"github.com/anthropics/mdm-server/internal/domain"
 	"github.com/anthropics/mdm-server/internal/middleware"
 	"github.com/anthropics/mdm-server/internal/port"
 )
 
 type CategoryController struct {
-	categoryRepo port.CategoryRepository
-	auth         *middleware.AuthHelper
+	categoryRepo   port.CategoryRepository
+	auth           *middleware.AuthHelper
+	rentalRuleRepo *postgres.CategoryRentalRuleRepo
 }
 
-func NewCategoryController(categoryRepo port.CategoryRepository, auth *middleware.AuthHelper) *CategoryController {
-	return &CategoryController{categoryRepo: categoryRepo, auth: auth}
+func NewCategoryController(categoryRepo port.CategoryRepository, auth *middleware.AuthHelper, rentalRuleRepo *postgres.CategoryRentalRuleRepo) *CategoryController {
+	return &CategoryController{categoryRepo: categoryRepo, auth: auth, rentalRuleRepo: rentalRuleRepo}
 }
 
 func (c *CategoryController) RegisterRoutes(mux *http.ServeMux) {
@@ -128,12 +133,20 @@ func (c *CategoryController) handleCategories(w http.ResponseWriter, r *http.Req
 // @Router /api/categories/{id} [put]
 // @Router /api/categories/{id} [delete]
 func (c *CategoryController) handleCategoryByID(w http.ResponseWriter, r *http.Request) {
-	if _, err := c.auth.RequireModule(r, "asset", "operator"); err != nil {
+	claims, err := c.auth.RequireModule(r, "asset", "operator")
+	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/api/categories/")
+	trimmed := strings.TrimPrefix(r.URL.Path, "/api/categories/")
+	parts := strings.Split(trimmed, "/")
+	id := parts[0]
 	w.Header().Set("Content-Type", "application/json")
+
+	if len(parts) == 2 && parts[1] == "rental-rule" {
+		c.handleCategoryRentalRule(w, r, claims, id)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodPut:
@@ -146,6 +159,53 @@ func (c *CategoryController) handleCategoryByID(w http.ResponseWriter, r *http.R
 	case http.MethodDelete:
 		c.categoryRepo.Delete(r.Context(), id)
 		writeOK(w)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+// handleCategoryRentalRule godoc
+// @Summary 取得/設定分類的「逐日追蹤」租借規則
+// @Tags Category
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path string true "分類 ID"
+// @Success 200 {object} map[string]interface{}
+// @Router /api/categories/{id}/rental-rule [get]
+// @Router /api/categories/{id}/rental-rule [put]
+func (c *CategoryController) handleCategoryRentalRule(w http.ResponseWriter, r *http.Request, claims *middleware.Claims, categoryID string) {
+	switch r.Method {
+	case http.MethodGet:
+		rule, err := c.rentalRuleRepo.Get(r.Context(), categoryID)
+		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			// No explicit row for this category — treat as "not required"
+			// (this GET only reports THIS category's own setting, not the
+			// inherited/resolved value, so the maintenance UI can show
+			// "not set at this level" distinctly from an explicit false).
+			writeJSON(w, map[string]interface{}{"category_id": categoryID, "daily_tracking_required": false, "is_explicit": false})
+			return
+		}
+		writeJSON(w, map[string]interface{}{"category_id": categoryID, "daily_tracking_required": rule.DailyTrackingRequired, "is_explicit": true})
+
+	case http.MethodPut:
+		var body struct {
+			DailyTrackingRequired bool `json:"daily_tracking_required"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if err := c.rentalRuleRepo.Upsert(r.Context(), categoryID, body.DailyTrackingRequired, claims.UserID); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		writeOK(w)
+
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
