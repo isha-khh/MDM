@@ -79,7 +79,20 @@ export function AssetList() {
     api.forEachNodeAfterFilterAndSort((node) => {
       if (node.data) ids.push(node.data.id);
     });
-    setVisibleIds(ids);
+    setVisibleIds((prev) => {
+      // Bail out with the SAME reference when the content hasn't actually
+      // changed. Without this, onModelUpdated -> setVisibleIds(newArray)
+      // -> re-render -> columnDefs (depends on visibleIds) recomputes ->
+      // DataGrid gets a new columnDefs array -> AG Grid reprocesses columns
+      // -> fires onModelUpdated again -> repeat forever. React only bails
+      // out of re-rendering when the updater returns the exact previous
+      // reference, so this is what actually breaks the loop rather than
+      // just making each iteration cheaper.
+      if (prev.length === ids.length && prev.every((id, i) => id === ids[i])) {
+        return prev;
+      }
+      return ids;
+    });
   };
 
   const onGridReady = (e: GridReadyEvent<AssetRow>) => {
