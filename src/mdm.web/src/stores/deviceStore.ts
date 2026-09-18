@@ -43,6 +43,11 @@ interface DeviceStore {
   setSelected: (udids: string[]) => void;
 }
 
+// Module-level (not store state) since they're plumbing for loadDevices'
+// scheduling, not UI state anything should render off of.
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let requestSeq = 0;
+
 export const useDeviceStore = create<DeviceStore>((set, get) => ({
   devices: [],
   total: 0,
@@ -52,15 +57,28 @@ export const useDeviceStore = create<DeviceStore>((set, get) => ({
 
   setFilter: (key, value) => {
     set((s) => ({ filters: { ...s.filters, [key]: value } }));
-    get().loadDevices();
+    if (key === "search") {
+      // Free-text search fires on every keystroke — without debouncing this
+      // was issuing a full /api/devices-list round trip (and a full grid
+      // rowData replacement) per character typed, which is exactly what
+      // reads as "AG Grid stutters/lags" while typing in the search box.
+      // The dropdown filters (category/custodian) change far less often, so
+      // they still apply immediately.
+      if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => get().loadDevices(), 300);
+    } else {
+      get().loadDevices();
+    }
   },
 
   clearFilters: () => {
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
     set({ filters: { search: "", categoryId: "", custodianId: "" } });
     get().loadDevices();
   },
 
   loadDevices: async () => {
+    const seq = ++requestSeq;
     set({ loading: true });
     try {
       const { filters } = get();
@@ -69,11 +87,15 @@ export const useDeviceStore = create<DeviceStore>((set, get) => ({
       if (filters.categoryId) params.category_id = filters.categoryId;
       if (filters.custodianId) params.custodian_id = filters.custodianId;
       const { data } = await apiClient.get("/api/devices-list", { params });
+      // A slower response for an older keystroke/filter can land after a
+      // faster response for a newer one — without this guard the grid could
+      // flicker back to stale results for whatever was typed a moment ago.
+      if (seq !== requestSeq) return;
       set({ devices: data.devices || [], total: data.total || 0 });
     } catch (err) {
       console.error("Load devices:", err);
     } finally {
-      set({ loading: false });
+      if (seq === requestSeq) set({ loading: false });
     }
   },
 
