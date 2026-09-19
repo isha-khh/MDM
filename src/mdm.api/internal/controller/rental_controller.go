@@ -214,26 +214,34 @@ func (c *RentalController) handlePickableAssets(w http.ResponseWriter, r *http.R
 		return
 	}
 	type row struct {
-		AssetID      string  `json:"asset_id"`
-		AssetNumber  string  `json:"asset_number"`
-		Name         string  `json:"name"`
-		Spec         string  `json:"spec"`
-		DeviceUdid   *string `json:"device_udid"`
-		SerialNumber string  `json:"serial_number"`
-		Model        string  `json:"model"`
-		OSVersion    string  `json:"os_version"`
-		AssetStatus  string  `json:"asset_status"`
-		CategoryID   *string `json:"category_id"`
-		CategoryName string  `json:"category_name"`
+		AssetID            string                 `json:"asset_id"`
+		AssetNumber        string                 `json:"asset_number"`
+		Name               string                 `json:"name"`
+		Spec               string                 `json:"spec"`
+		DeviceUdid         *string                `json:"device_udid"`
+		SerialNumber       string                 `json:"serial_number"`
+		Model              string                 `json:"model"`
+		OSVersion          string                 `json:"os_version"`
+		AssetStatus        string                 `json:"asset_status"`
+		CategoryID         *string                `json:"category_id"`
+		CategoryName       string                 `json:"category_name"`
+		LastReturnLocation map[string]interface{} `json:"last_return_location,omitempty"`
+		LastReturnAt       *string                `json:"last_return_at,omitempty"`
 	}
 	rows := make([]row, 0, len(items))
 	for _, it := range items {
-		rows = append(rows, row{
+		rr := row{
 			AssetID: it.AssetID, AssetNumber: it.AssetNumber, Name: it.Name, Spec: it.Spec,
 			DeviceUdid:   it.DeviceUdid,
 			SerialNumber: it.SerialNumber, Model: it.Model, OSVersion: it.OSVersion,
 			AssetStatus: it.AssetStatus, CategoryID: it.CategoryID, CategoryName: it.CategoryName,
-		})
+			LastReturnLocation: it.LastReturnLocation,
+		}
+		if it.LastReturnAt != nil {
+			s := it.LastReturnAt.Format(time.RFC3339)
+			rr.LastReturnAt = &s
+		}
+		rows = append(rows, rr)
 	}
 	writeJSON(w, map[string]interface{}{"assets": rows})
 }
@@ -700,6 +708,47 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 			assetIDs, _ := c.rentalRepo.ListAssetIDsByNumber(r.Context(), rental.RentalNumber)
 			for _, aid := range assetIDs {
 				c.assetRepo.ClearHolderByID(r.Context(), aid)
+			}
+			// Phase 2c: if the verified checklist answered a "location" type
+			// item, record it on every asset in this batch as their last
+			// known return location (AssetPicker surfaces it for the next
+			// person choosing this asset). Resolved from the categories
+			// actually involved, not guessed from key names.
+			if returnBody.Checklist != nil {
+				categoryIDs := make([]*string, 0, len(assetIDs))
+				for _, aid := range assetIDs {
+					a, err := c.assetRepo.GetByID(r.Context(), aid)
+					if err == nil && a != nil {
+						categoryIDs = append(categoryIDs, a.CategoryID)
+					}
+				}
+				if cats, err := c.categoryRepo.List(r.Context()); err == nil {
+					var catIDStrs []string
+					for _, cid := range categoryIDs {
+						if cid != nil && *cid != "" {
+							catIDStrs = append(catIDStrs, *cid)
+						}
+					}
+					if items, err := c.templateRepo.ResolveMerged(r.Context(), cats, catIDStrs); err == nil {
+						for _, it := range items {
+							if it.Type != "location" {
+								continue
+							}
+							v, ok := returnBody.Checklist[it.Key]
+							if !ok || v == nil {
+								continue
+							}
+							locJSON, err := json.Marshal(v)
+							if err != nil {
+								continue
+							}
+							for _, aid := range assetIDs {
+								c.assetRepo.UpdateLastReturnLocation(r.Context(), aid, locJSON)
+							}
+							break
+						}
+					}
+				}
 			}
 			// Notify custodian that devices are returned
 			go func() {

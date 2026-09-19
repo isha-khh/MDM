@@ -341,26 +341,34 @@ func (c *AssetController) handlePickableAssets(w http.ResponseWriter, r *http.Re
 		return
 	}
 	type row struct {
-		AssetID      string  `json:"asset_id"`
-		AssetNumber  string  `json:"asset_number"`
-		Name         string  `json:"name"`
-		Spec         string  `json:"spec"`
-		DeviceUdid   *string `json:"device_udid"`
-		SerialNumber string  `json:"serial_number"`
-		Model        string  `json:"model"`
-		OSVersion    string  `json:"os_version"`
-		AssetStatus  string  `json:"asset_status"`
-		CategoryID   *string `json:"category_id"`
-		CategoryName string  `json:"category_name"`
+		AssetID            string                 `json:"asset_id"`
+		AssetNumber        string                 `json:"asset_number"`
+		Name               string                 `json:"name"`
+		Spec               string                 `json:"spec"`
+		DeviceUdid         *string                `json:"device_udid"`
+		SerialNumber       string                 `json:"serial_number"`
+		Model              string                 `json:"model"`
+		OSVersion          string                 `json:"os_version"`
+		AssetStatus        string                 `json:"asset_status"`
+		CategoryID         *string                `json:"category_id"`
+		CategoryName       string                 `json:"category_name"`
+		LastReturnLocation map[string]interface{} `json:"last_return_location,omitempty"`
+		LastReturnAt       *string                `json:"last_return_at,omitempty"`
 	}
 	rows := make([]row, 0, len(items))
 	for _, it := range items {
-		rows = append(rows, row{
+		rr := row{
 			AssetID: it.AssetID, AssetNumber: it.AssetNumber, Name: it.Name, Spec: it.Spec,
 			DeviceUdid:   it.DeviceUdid,
 			SerialNumber: it.SerialNumber, Model: it.Model, OSVersion: it.OSVersion,
 			AssetStatus: it.AssetStatus, CategoryID: it.CategoryID, CategoryName: it.CategoryName,
-		})
+			LastReturnLocation: it.LastReturnLocation,
+		}
+		if it.LastReturnAt != nil {
+			s := it.LastReturnAt.Format(time.RFC3339)
+			rr.LastReturnAt = &s
+		}
+		rows = append(rows, rr)
 	}
 	writeJSON(w, map[string]interface{}{"assets": rows})
 }
