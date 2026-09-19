@@ -29,6 +29,7 @@ func NewCategoryController(categoryRepo port.CategoryRepository, auth *middlewar
 func (c *CategoryController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/categories", c.handleCategories)
 	mux.HandleFunc("/api/categories/", c.handleCategoryByID)
+	mux.HandleFunc("/api/category-rental-rules/resolve", c.handleResolveDailyTracking)
 }
 
 // handleCategories godoc
@@ -172,6 +173,53 @@ func (c *CategoryController) handleCategoryByID(w http.ResponseWriter, r *http.R
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+// handleResolveDailyTracking godoc
+// @Summary 依分類清單解析是否套用「逐日追蹤」規則（含繼承；任一分類命中即為 true）
+// @Tags Category
+// @Produce json
+// @Security BearerAuth
+// @Param category_ids query string false "逗號分隔的分類 ID"
+// @Success 200 {object} map[string]interface{}
+// @Router /api/category-rental-rules/resolve [get]
+func (c *CategoryController) handleResolveDailyTracking(w http.ResponseWriter, r *http.Request) {
+	if _, err := c.auth.RequireModule(r, "rental", "requester"); err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	var categoryIDs []string
+	for _, s := range strings.Split(r.URL.Query().Get("category_ids"), ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			categoryIDs = append(categoryIDs, s)
+		}
+	}
+
+	cats, err := c.categoryRepo.List(r.Context())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	required := false
+	for _, cid := range categoryIDs {
+		ok, err := c.rentalRuleRepo.ResolveDailyTrackingRequired(r.Context(), cats, cid)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if ok {
+			required = true
+			break
+		}
+	}
+	writeJSON(w, map[string]interface{}{"daily_tracking_required": required})
 }
 
 // handleCategoryRentalRule godoc
