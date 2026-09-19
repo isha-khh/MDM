@@ -22,7 +22,7 @@ const rentalSelectColumns = `r.id, r.asset_id, r.device_udid, r.borrower_id, r.b
 	             COALESCE(d.device_name,'') as device_name, COALESCE(d.serial_number,'') as device_serial,
 	             COALESCE(a.asset_number,'') as asset_number, COALESCE(a.name,'') as asset_name,
 	             a.custodian_id, COALESCE(a.custodian_name,'') as custodian_name,
-	             r.rental_number, r.is_archived, r.return_checklist, r.return_notes`
+	             r.rental_number, r.is_archived, r.return_checklist, r.return_notes, r.multi_day_reason, a.category_id`
 
 const rentalFromJoin = `FROM rentals r
 	LEFT JOIN assets a ON a.id = r.asset_id
@@ -45,6 +45,7 @@ func scanRental(rows interface {
 		&rental.AssetNumber, &rental.AssetName,
 		&rental.CustodianID, &rental.CustodianName,
 		&rental.RentalNumber, &rental.IsArchived, &checklistJSON, &rental.ReturnNotes,
+		&rental.MultiDayReason, &rental.CategoryID,
 	)
 	if err != nil {
 		return nil, err
@@ -104,11 +105,19 @@ func (r *RentalRepo) Create(ctx context.Context, rental *domain.Rental) (string,
 	if rental.DeviceUdid != "" {
 		udid = rental.DeviceUdid
 	}
+	// BorrowDate is now caller-supplied (Phase 1 of 租借 2.1: fillable at
+	// creation, unrestricted range) rather than relying on the column's
+	// DEFAULT now(). Callers that don't set it explicitly get today, same as
+	// the old default behaved.
+	borrowDate := rental.BorrowDate
+	if borrowDate.IsZero() {
+		borrowDate = time.Now()
+	}
 	err := r.pool.QueryRow(ctx,
-		`INSERT INTO rentals (asset_id, device_udid, borrower_id, borrower_name, purpose, expected_return, notes, rental_number)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+		`INSERT INTO rentals (asset_id, device_udid, borrower_id, borrower_name, purpose, borrow_date, expected_return, notes, rental_number, multi_day_reason)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
 		rental.AssetID, udid, rental.BorrowerID, rental.BorrowerName, rental.Purpose,
-		rental.ExpectedReturn, rental.Notes, rental.RentalNumber,
+		borrowDate, rental.ExpectedReturn, rental.Notes, rental.RentalNumber, rental.MultiDayReason,
 	).Scan(&id)
 	return id, err
 }
@@ -117,9 +126,10 @@ func (r *RentalRepo) GetByID(ctx context.Context, id string) (*domain.Rental, er
 	rental := &domain.Rental{}
 	var rentalNumber int
 	var deviceUdid, assetID *string
+	var expectedReturn *time.Time
 	err := r.pool.QueryRow(ctx,
-		`SELECT asset_id, device_udid, status, rental_number FROM rentals WHERE id=$1`, id,
-	).Scan(&assetID, &deviceUdid, &rental.Status, &rentalNumber)
+		`SELECT asset_id, device_udid, status, rental_number, borrow_date, expected_return FROM rentals WHERE id=$1`, id,
+	).Scan(&assetID, &deviceUdid, &rental.Status, &rentalNumber, &rental.BorrowDate, &expectedReturn)
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +139,7 @@ func (r *RentalRepo) GetByID(ctx context.Context, id string) (*domain.Rental, er
 		rental.DeviceUdid = *deviceUdid
 	}
 	rental.RentalNumber = rentalNumber
+	rental.ExpectedReturn = expectedReturn
 	return rental, nil
 }
 
@@ -146,8 +157,11 @@ func (r *RentalRepo) UpdateStatusByNumber(ctx context.Context, rentalNumber int,
 }
 
 func (r *RentalRepo) ActivateByNumber(ctx context.Context, rentalNumber int) error {
+	// borrow_date is no longer reset to now() here: Phase 1 of 租借 2.1 made
+	// it a caller-supplied, locked-after-creation field (see Create), so
+	// activation must not silently overwrite whatever the requester entered.
 	_, err := r.pool.Exec(ctx,
-		`UPDATE rentals SET status='active', borrow_date=now(), updated_at=now() WHERE rental_number=$1 AND status='approved'`,
+		`UPDATE rentals SET status='active', updated_at=now() WHERE rental_number=$1 AND status='approved'`,
 		rentalNumber)
 	return err
 }

@@ -20,15 +20,91 @@ import (
 )
 
 type RentalController struct {
-	rentalRepo *postgres.RentalRepo
-	assetRepo  *postgres.AssetRepo
-	userRepo   port.UserRepository
-	notifySvc  *service.NotifyService
-	auth       *middleware.AuthHelper
+	rentalRepo      *postgres.RentalRepo
+	assetRepo       *postgres.AssetRepo
+	userRepo        port.UserRepository
+	notifySvc       *service.NotifyService
+	auth            *middleware.AuthHelper
+	categoryRepo    port.CategoryRepository
+	rentalRuleRepo  *postgres.CategoryRentalRuleRepo
+	dailyReportRepo *postgres.RentalDailyReportRepo
 }
 
-func NewRentalController(rentalRepo *postgres.RentalRepo, assetRepo *postgres.AssetRepo, userRepo port.UserRepository, notifySvc *service.NotifyService, auth *middleware.AuthHelper) *RentalController {
-	return &RentalController{rentalRepo: rentalRepo, assetRepo: assetRepo, userRepo: userRepo, notifySvc: notifySvc, auth: auth}
+func NewRentalController(rentalRepo *postgres.RentalRepo, assetRepo *postgres.AssetRepo, userRepo port.UserRepository, notifySvc *service.NotifyService, auth *middleware.AuthHelper, categoryRepo port.CategoryRepository, rentalRuleRepo *postgres.CategoryRentalRuleRepo, dailyReportRepo *postgres.RentalDailyReportRepo) *RentalController {
+	return &RentalController{
+		rentalRepo: rentalRepo, assetRepo: assetRepo, userRepo: userRepo, notifySvc: notifySvc, auth: auth,
+		categoryRepo: categoryRepo, rentalRuleRepo: rentalRuleRepo, dailyReportRepo: dailyReportRepo,
+	}
+}
+
+// resolveDailyTrackingRequired reports whether any of the given assets'
+// categories (walking up the inheritance chain) is flagged
+// daily_tracking_required — a "union" match, same as the checklist-merge
+// policy planned for Phase 2. categoryIDs may contain nils (standalone
+// assets with no category), which are simply skipped.
+func (c *RentalController) resolveDailyTrackingRequired(ctx context.Context, categoryIDs []*string) (bool, error) {
+	hasCategory := false
+	for _, cid := range categoryIDs {
+		if cid != nil && *cid != "" {
+			hasCategory = true
+			break
+		}
+	}
+	if !hasCategory {
+		return false, nil
+	}
+	cats, err := c.categoryRepo.List(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, cid := range categoryIDs {
+		if cid == nil || *cid == "" {
+			continue
+		}
+		required, err := c.rentalRuleRepo.ResolveDailyTrackingRequired(ctx, cats, *cid)
+		if err != nil {
+			return false, err
+		}
+		if required {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// resolveDailyTrackingRequiredForRentalNumber is the same check, but for an
+// already-created rental batch — used by the daily-report endpoint, which
+// only has a rental ID (not the original create-time category list) to work
+// from.
+func (c *RentalController) resolveDailyTrackingRequiredForRentalNumber(ctx context.Context, rentalNumber int) (bool, error) {
+	assetIDs, err := c.rentalRepo.ListAssetIDsByNumber(ctx, rentalNumber)
+	if err != nil {
+		return false, err
+	}
+	categoryIDs := make([]*string, 0, len(assetIDs))
+	for _, aid := range assetIDs {
+		a, err := c.assetRepo.GetByID(ctx, aid)
+		if err != nil || a == nil {
+			continue
+		}
+		categoryIDs = append(categoryIDs, a.CategoryID)
+	}
+	return c.resolveDailyTrackingRequired(ctx, categoryIDs)
+}
+
+// sameCalendarDay compares two times ignoring time-of-day/timezone offset
+// within the day — used to decide whether a rental spans more than one day.
+func sameCalendarDay(a, b time.Time) bool {
+	ay, am, ad := a.Date()
+	by, bm, bd := b.Date()
+	return ay == by && am == bm && ad == bd
+}
+
+// dateOnly truncates t to a bare calendar date (midnight, same location),
+// for comparing DATE-typed values without time-of-day noise.
+func dateOnly(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
 }
 
 // buildNotifyData gathers device names and common fields for notification emails.
@@ -153,6 +229,9 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		// Fetched once and reused for every row's daily-tracking resolution
+		// below, rather than re-querying the (small) category tree per row.
+		categoriesCache, _ := c.categoryRepo.List(r.Context())
 		rows := make([]map[string]interface{}, 0, len(rentals))
 		for _, rl := range rentals {
 			row := map[string]interface{}{
@@ -167,6 +246,13 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 				"custodian_id": rl.CustodianID, "custodian_name": rl.CustodianName,
 				"rental_number": rl.RentalNumber, "is_archived": rl.IsArchived,
 				"return_checklist": rl.ReturnChecklist, "return_notes": rl.ReturnNotes,
+				"multi_day_reason": rl.MultiDayReason,
+			}
+			if rl.CategoryID != nil {
+				dailyTracking, dErr := c.rentalRuleRepo.ResolveDailyTrackingRequired(r.Context(), categoriesCache, *rl.CategoryID)
+				row["daily_tracking_required"] = dErr == nil && dailyTracking
+			} else {
+				row["daily_tracking_required"] = false
 			}
 			if rl.ExpectedReturn != nil {
 				row["expected_return"] = rl.ExpectedReturn.Format("2006-01-02")
@@ -188,8 +274,13 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 			DeviceUdids    []string `json:"device_udids"` // legacy fallback
 			BorrowerID     string   `json:"borrower_id"`
 			Purpose        string   `json:"purpose"`
+			BorrowDate     *string  `json:"borrow_date"`
 			ExpectedReturn *string  `json:"expected_return"`
 			Notes          string   `json:"notes"`
+			// MultiDayReason is required when the booking spans more than one
+			// calendar day AND at least one asset's category is flagged
+			// daily_tracking_required (e.g. a multi-day vehicle trip).
+			MultiDayReason string `json:"multi_day_reason"`
 			// Category mode: multiple {category_id, quantity} lines.
 			CategoryLines []struct {
 				CategoryID string `json:"category_id"`
@@ -249,9 +340,10 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 
 		// Check availability and collect asset → udid mapping for later use
 		type resolvedAsset struct {
-			assetID string
-			udid    string // may be empty for standalone
-			name    string
+			assetID    string
+			udid       string // may be empty for standalone
+			name       string
+			categoryID *string
 		}
 		resolved := make([]resolvedAsset, 0, len(body.AssetIDs))
 		var unavailable []string
@@ -278,7 +370,7 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 			if a.DeviceUdid != nil {
 				udid = *a.DeviceUdid
 			}
-			resolved = append(resolved, resolvedAsset{assetID: aid, udid: udid, name: label})
+			resolved = append(resolved, resolvedAsset{assetID: aid, udid: udid, name: label, categoryID: a.CategoryID})
 		}
 		if len(unavailable) > 0 {
 			w.WriteHeader(http.StatusConflict)
@@ -291,12 +383,45 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 
 		rentalNumber, _ := c.rentalRepo.NextRentalNumber(r.Context())
 
+		// Phase 1 of 租借 2.1: borrow_date is fillable at creation (unrestricted
+		// range), defaulting to today when omitted — same as the old DB
+		// DEFAULT now() behavior, just made explicit so it can also be
+		// compared against expected_return below.
+		borrowDate := time.Now()
+		if body.BorrowDate != nil && strings.TrimSpace(*body.BorrowDate) != "" {
+			t, err := time.Parse("2006-01-02", *body.BorrowDate)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid borrow_date")
+				return
+			}
+			borrowDate = t
+		}
+
 		var expectedReturn *time.Time
 		if body.ExpectedReturn != nil && *body.ExpectedReturn != "" {
 			t, err := time.Parse("2006-01-02", *body.ExpectedReturn)
 			if err == nil {
 				expectedReturn = &t
 			}
+		}
+
+		// Vehicle "daily tracking" rule: a booking spanning more than one
+		// calendar day, where any involved asset's category resolves to
+		// daily_tracking_required, must explain why.
+		categoryIDs := make([]*string, 0, len(resolved))
+		for _, it := range resolved {
+			categoryIDs = append(categoryIDs, it.categoryID)
+		}
+		dailyTrackingRequired, err := c.resolveDailyTrackingRequired(r.Context(), categoryIDs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		isMultiDay := expectedReturn != nil && !sameCalendarDay(borrowDate, *expectedReturn)
+		multiDayReason := strings.TrimSpace(body.MultiDayReason)
+		if dailyTrackingRequired && isMultiDay && multiDayReason == "" {
+			writeError(w, http.StatusBadRequest, "此租借涉及逐日追蹤分類（如車輛），跨日租借需填寫說明")
+			return
 		}
 
 		var ids []string
@@ -308,6 +433,8 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 				BorrowerID:     body.BorrowerID,
 				BorrowerName:   borrowerName,
 				Purpose:        body.Purpose,
+				BorrowDate:     borrowDate,
+				MultiDayReason: multiDayReason,
 				ExpectedReturn: expectedReturn,
 				Notes:          body.Notes,
 				RentalNumber:   rentalNumber,
@@ -490,9 +617,38 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 			}()
 			writeJSON(w, map[string]interface{}{"ok": true, "status": "rejected"})
 
+		case "daily-report":
+			c.handleDailyReport(w, r, claims, rental)
+
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 		}
+		return
+	}
+
+	if r.Method == http.MethodGet && action == "daily-reports" {
+		rental, err := c.rentalRepo.GetByID(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "rental not found")
+			return
+		}
+		reports, err := c.dailyReportRepo.ListByNumber(r.Context(), rental.RentalNumber)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		rows := make([]map[string]interface{}, 0, len(reports))
+		for _, rep := range reports {
+			rows = append(rows, map[string]interface{}{
+				"id":              rep.ID,
+				"report_date":     rep.ReportDate.Format("2006-01-02"),
+				"checklist":       rep.Checklist,
+				"backfill_reason": rep.BackfillReason,
+				"reported_by":     rep.ReportedBy,
+				"reported_at":     rep.ReportedAt.Format(time.RFC3339),
+			})
+		}
+		writeJSON(w, map[string]interface{}{"reports": rows})
 		return
 	}
 
@@ -508,6 +664,112 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.WriteHeader(http.StatusMethodNotAllowed)
+}
+
+// handleDailyReport godoc
+// @Summary 逐日追蹤分類的每日回報（跟歸還是分開的動作，裝置狀態不變）
+// @Tags Rental
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path string true "借用單 ID"
+// @Success 200 {object} swagOK
+// @Failure 400 {object} swagError
+// @Failure 403 {object} swagError
+// @Failure 404 {object} swagError
+// @Failure 409 {object} swagError
+// @Router /api/rentals/{id}/daily-report [post]
+func (c *RentalController) handleDailyReport(w http.ResponseWriter, r *http.Request, claims *middleware.Claims, rental *domain.Rental) {
+	if rental.Status != "active" {
+		writeError(w, http.StatusBadRequest, "rental is not active")
+		return
+	}
+
+	borrowerID, _, err := c.rentalRepo.GetBorrowerInfo(r.Context(), rental.ID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "rental not found")
+		return
+	}
+	if claims.UserID != borrowerID && claims.Role != "admin" {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	required, err := c.resolveDailyTrackingRequiredForRentalNumber(r.Context(), rental.RentalNumber)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !required {
+		// This rental's category isn't flagged daily_tracking_required —
+		// daily reports don't apply to it, so this endpoint simply doesn't
+		// exist for it.
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	var body struct {
+		Checklist      map[string]interface{} `json:"checklist"`
+		ReportDate     *string                `json:"report_date"`
+		BackfillReason string                 `json:"backfill_reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+
+	today := dateOnly(time.Now())
+	reportDate := today
+	backfillReason := ""
+	if body.ReportDate != nil && strings.TrimSpace(*body.ReportDate) != "" {
+		parsed, err := time.Parse("2006-01-02", *body.ReportDate)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid report_date")
+			return
+		}
+		parsed = dateOnly(parsed)
+		if !parsed.Before(today) {
+			writeError(w, http.StatusBadRequest, "report_date 必須是過去日期（今天請不要帶 report_date）")
+			return
+		}
+		if parsed.Before(dateOnly(rental.BorrowDate)) {
+			writeError(w, http.StatusBadRequest, "report_date 早於借出日期")
+			return
+		}
+		if rental.ExpectedReturn != nil && parsed.After(dateOnly(*rental.ExpectedReturn)) {
+			writeError(w, http.StatusBadRequest, "report_date 超出租期範圍")
+			return
+		}
+		backfillReason = strings.TrimSpace(body.BackfillReason)
+		if backfillReason == "" {
+			writeError(w, http.StatusBadRequest, "補登過去日期需填寫原因")
+			return
+		}
+		reportDate = parsed
+	}
+
+	exists, err := c.dailyReportRepo.ExistsForDate(r.Context(), rental.RentalNumber, reportDate)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if exists {
+		writeError(w, http.StatusConflict, "這天已經回報過了")
+		return
+	}
+
+	reportedBy := claims.UserID
+	if _, err := c.dailyReportRepo.Create(r.Context(), &domain.RentalDailyReport{
+		RentalNumber:   rental.RentalNumber,
+		ReportDate:     reportDate,
+		Checklist:      body.Checklist,
+		BackfillReason: backfillReason,
+		ReportedBy:     &reportedBy,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "report_date": reportDate.Format("2006-01-02"), "backfilled": backfillReason != ""})
 }
 
 // handleExport godoc
