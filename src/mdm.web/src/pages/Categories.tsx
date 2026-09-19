@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import apiClient from "../lib/apiClient";
 import { useDialog } from "../components/DialogProvider";
+import { RichTextEditor } from "../components/RichTextEditor";
 import { Plus, Trash2, Edit3, Save, X, ChevronRight, FolderTree, ClipboardList, ArrowUp, ArrowDown, AlertTriangle } from "lucide-react";
 
 interface Category {
@@ -178,14 +179,31 @@ export function Categories() {
     } finally { setNoticeLoading(false); }
   };
 
+  // The rich text editor always emits real markup (e.g. "<p></p>") even when
+  // visually empty, so "did the admin actually clear this" needs to check
+  // for leftover text/images rather than just checking for an empty string.
+  const isRichTextEmpty = (html: string) =>
+    html.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim() === "" && !/<img[\s/]/i.test(html);
+
   const saveNotice = async () => {
     if (!noticeCategoryId) return;
     setNoticeSaving(true);
     try {
-      await apiClient.put(`/api/categories/${noticeCategoryId}/notice`, { content: noticeContent.trim() });
+      const content = isRichTextEmpty(noticeContent) ? "" : noticeContent;
+      await apiClient.put(`/api/categories/${noticeCategoryId}/notice`, { content });
       setNoticeCategoryId(null);
     } catch { await dialog.error("儲存失敗"); }
     finally { setNoticeSaving(false); }
+  };
+
+  const uploadNoticeImage = async (file: File): Promise<string> => {
+    const form = new FormData();
+    form.append("file", file);
+    if (noticeCategoryId) form.append("category_id", noticeCategoryId);
+    const { data } = await apiClient.post("/api/category-notice-images", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+    return `/api/category-notice-images/${data.id}`;
   };
 
   // Build tree structure for rendering
@@ -486,17 +504,15 @@ export function Categories() {
             {noticeIsExplicit
               ? "此分類已有自己的設定"
               : "此分類目前沒有設定（也沒有從上層分類繼承到），送出租借申請時不會跳出提醒；儲存非空白內容後才會開始套用"}
+            　留空並儲存 = 清除此分類自己的設定，改回繼承上層或不套用
           </p>
 
           {noticeLoading ? (
             <div className="flex justify-center py-8"><span className="loading loading-spinner"></span></div>
           ) : (
-            <textarea
-              value={noticeContent}
-              onChange={(e) => setNoticeContent(e.target.value)}
-              placeholder="例如：使用車輛前請確認油量、行照隨車攜帶，發生事故請立即通知保管人…（留空 = 清除此分類自己的設定，改回繼承上層或不套用）"
-              className="textarea textarea-bordered w-full mt-4 min-h-40"
-            />
+            <div className="mt-4">
+              <RichTextEditor value={noticeContent} onChange={setNoticeContent} onUploadImage={uploadNoticeImage} />
+            </div>
           )}
 
           <div className="modal-action">
