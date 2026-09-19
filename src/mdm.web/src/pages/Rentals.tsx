@@ -9,87 +9,12 @@ import { useDialog } from "../components/DialogProvider";
 import {
   Check, X, RotateCcw, Play, UserPlus, Clock,
   CheckCircle, AlertCircle, ArrowRight, FileDown, Archive, Plus, Trash2, Gauge,
-  MapPin, Camera,
 } from "lucide-react";
 import type { ColDef, ICellRendererParams } from "ag-grid-enterprise";
 import { DataGrid } from "../components/DataGrid";
-
-// Dynamic checklist item, resolved from the category-bound templates
-// maintained in Categories.tsx (Phase 2a). Mirrors the backend's
-// domain.ChecklistItem.
-type ChecklistItemType = "boolean" | "text" | "number" | "location" | "photo";
-
-interface ChecklistItem {
-  key: string;
-  label: string;
-  type: ChecklistItemType;
-  required: boolean;
-  unit?: string;
-  maxCount?: number;
-}
-
-type ChecklistAnswers = Record<string, unknown>;
-
-interface Rental {
-  id: string;
-  asset_id: string | null;
-  device_udid: string | null;
-  asset_number: string;
-  asset_name: string;
-  borrower_id: string;
-  borrower_name: string;
-  approver_id?: string;
-  approver_name: string;
-  custodian_id?: string;
-  custodian_name: string;
-  status: string;
-  purpose: string;
-  borrow_date: string;
-  expected_return?: string;
-  actual_return?: string;
-  notes: string;
-  device_name: string;
-  device_serial: string;
-  rental_number: number;
-  is_archived: boolean;
-  category_id?: string | null;
-  return_checklist?: ChecklistAnswers;
-  return_notes?: string;
-  return_checklist_reported?: ChecklistAnswers;
-  cross_day_reason?: string;
-  multi_day_reason?: string;
-  daily_tracking_required?: boolean;
-}
-
-interface RentalGroup {
-  rental_number: number;
-  rentals: Rental[];
-  borrower_id: string;
-  borrower_name: string;
-  purpose: string;
-  status: string;
-  borrow_date: string;
-  expected_return?: string;
-  actual_return?: string;
-  approver_name: string;
-  is_archived: boolean;
-  custodian_name: string;
-  custodian_id?: string;
-  return_checklist?: ChecklistAnswers;
-  return_notes?: string;
-  return_checklist_reported?: ChecklistAnswers;
-  cross_day_reason?: string;
-  multi_day_reason?: string;
-  daily_tracking_required?: boolean;
-}
-
-interface DailyReport {
-  id: string;
-  report_date: string;
-  checklist: Record<string, unknown>;
-  backfill_reason: string;
-  reported_at: string;
-}
+import { type ChecklistItem, type ChecklistAnswers, isChecklistItemFilled } from "../lib/checklist";
+import { ChecklistFields } from "../components/ChecklistFields";
+import { type Rental, type RentalGroup, type DailyReport, groupByRentalNumber } from "../lib/rentalTypes";
 
 interface UserOption {
   id: string;
@@ -105,44 +30,6 @@ const statusConfig: Record<string, { label: string; badge: string; icon: React.R
   returned:       { label: "已歸還", badge: "badge-ghost",   icon: <RotateCcw size={14} /> },
   rejected:       { label: "已拒絕", badge: "badge-error",   icon: <X size={14} /> },
 };
-
-function groupByRentalNumber(rentals: Rental[]): RentalGroup[] {
-  const map = new Map<number, Rental[]>();
-  for (const r of rentals) {
-    const list = map.get(r.rental_number) || [];
-    list.push(r);
-    map.set(r.rental_number, list);
-  }
-  const groups: RentalGroup[] = [];
-  for (const [num, items] of map) {
-    const first = items[0];
-    groups.push({
-      rental_number: num,
-      rentals: items,
-      borrower_id: first.borrower_id,
-      borrower_name: first.borrower_name,
-      purpose: first.purpose,
-      status: first.status,
-      borrow_date: first.borrow_date,
-      expected_return: first.expected_return,
-      actual_return: first.actual_return,
-      approver_name: first.approver_name,
-      is_archived: first.is_archived,
-      custodian_name: first.custodian_name,
-      custodian_id: first.custodian_id,
-      return_checklist: first.return_checklist,
-      return_notes: first.return_notes,
-      return_checklist_reported: first.return_checklist_reported,
-      cross_day_reason: first.cross_day_reason,
-      multi_day_reason: first.multi_day_reason,
-      // Union across the batch, matching the backend's own union policy for
-      // "does this batch touch any daily-tracking category".
-      daily_tracking_required: items.some((it) => it.daily_tracking_required),
-    });
-  }
-  groups.sort((a, b) => b.rental_number - a.rental_number);
-  return groups;
-}
 
 async function downloadExportExcel(ids?: string[]) {
   const params = new URLSearchParams();
@@ -164,231 +51,18 @@ async function downloadExportExcel(ids?: string[]) {
   URL.revokeObjectURL(url);
 }
 
-function isChecklistItemFilled(item: ChecklistItem, value: unknown): boolean {
-  if (!item.required) return true;
-  switch (item.type) {
-    case "boolean": return value === true;
-    case "photo": return Array.isArray(value) && value.length > 0;
-    case "location": return !!value && typeof value === "object";
-    case "number": return value !== undefined && value !== null && value !== "";
-    case "text": default: return typeof value === "string" && value.trim() !== "";
-  }
-}
-
-// Downscales an image client-side before upload (long edge capped at
-// maxDim, re-encoded as JPEG) — a phone camera photo straight off the
-// sensor can be 5-10MB, which would otherwise land directly in the
-// database via checklist_photos. Falls back to the original file if
-// anything about the canvas path fails.
-function resizeImage(file: File, maxDim: number): Promise<Blob> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      let { width, height } = img;
-      if (width > maxDim || height > maxDim) {
-        const scale = maxDim / Math.max(width, height);
-        width = Math.round(width * scale);
-        height = Math.round(height * scale);
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) { resolve(file); return; }
-      ctx.drawImage(img, 0, 0, width, height);
-      canvas.toBlob((blob) => resolve(blob || file), "image/jpeg", 0.85);
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
-    img.src = url;
+// Desktop always has network, so a checklist photo just uploads immediately
+// and the real id is stored — no local-blob staging needed (that's the
+// mobile self-service pages' offline-queue concern, see src/lib/offlineQueue.ts).
+async function uploadChecklistPhoto(file: File, item: ChecklistItem, rentalNumber: number): Promise<string> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  form.append("rental_number", String(rentalNumber));
+  form.append("item_key", item.key);
+  const { data } = await apiClient.post("/api/checklist-photos", form, {
+    headers: { "Content-Type": "multipart/form-data" },
   });
-}
-
-function ChecklistLocationField({ item, value, onChange }: {
-  item: ChecklistItem;
-  value: unknown;
-  onChange: (v: unknown) => void;
-}) {
-  const [manual, setManual] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const v = value as { lat?: number; lng?: number; address?: string } | undefined;
-
-  const capture = () => {
-    setBusy(true);
-    if (!navigator.geolocation) { setManual(true); setBusy(false); return; }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        onChange({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy, capturedAt: new Date().toISOString() });
-        setBusy(false);
-      },
-      () => { setManual(true); setBusy(false); },
-      { enableHighAccuracy: true, timeout: 10000 },
-    );
-  };
-
-  return (
-    <div className="form-control">
-      <label className="label">
-        <span className="label-text text-sm">{item.label}{item.required && <span className="text-error"> *</span>}</span>
-      </label>
-      {v?.lat != null ? (
-        <div className="space-y-2">
-          <div className="flex items-center gap-2 text-sm flex-wrap">
-            <MapPin size={14} className="text-success" />
-            <a className="link link-primary" target="_blank" rel="noreferrer" href={`https://maps.google.com/?q=${v.lat},${v.lng}`}>
-              已定位（開啟地圖）
-            </a>
-            <button type="button" className="btn btn-ghost btn-xs" onClick={capture}>重新定位</button>
-          </div>
-          {/* Simple embed, no API key needed (Google's legacy "output=embed"
-              parameter) — just a quick visual preview, "開啟地圖" above is
-              still the way to get directions/a full interactive map. */}
-          <iframe
-            title={`${item.label} 地圖預覽`}
-            src={`https://maps.google.com/maps?q=${v.lat},${v.lng}&z=16&output=embed`}
-            className="w-full h-40 rounded border border-base-300"
-            loading="lazy"
-          />
-        </div>
-      ) : manual ? (
-        <input
-          type="text"
-          className="input input-bordered input-sm"
-          placeholder="手動輸入地址"
-          value={v?.address || ""}
-          onChange={(e) => onChange({ address: e.target.value })}
-        />
-      ) : (
-        <div className="flex items-center gap-2">
-          <button type="button" className="btn btn-outline btn-sm gap-1" disabled={busy} onClick={capture}>
-            {busy ? <span className="loading loading-spinner loading-xs" /> : <MapPin size={14} />} 取得目前位置
-          </button>
-          <button type="button" className="btn btn-link btn-xs" onClick={() => setManual(true)}>改用手動輸入地址</button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Shared dynamic checklist renderer — used by both the return dialog and the
-// daily-report dialog (Phase 1's daily report predates Phase 2a's per-category
-// templates and used to hardcode a single "mileage" number field; it now
-// resolves and renders the same category-bound template as the return flow).
-function ChecklistFields({ items, values, onChange, rentalNumber }: {
-  items: ChecklistItem[];
-  values: ChecklistAnswers;
-  onChange: (key: string, value: unknown) => void;
-  rentalNumber: number;
-}) {
-  return (
-    <div className="space-y-3">
-      {items.map((item) => {
-        const value = values[item.key];
-        const setValue = (v: unknown) => onChange(item.key, v);
-        if (item.type === "boolean") {
-          return (
-            <label key={item.key} className="flex items-center gap-3 cursor-pointer p-2 rounded hover:bg-base-200">
-              <input
-                type="checkbox"
-                className="checkbox checkbox-sm checkbox-success"
-                checked={value === true}
-                onChange={(e) => setValue(e.target.checked)}
-              />
-              <span className="text-sm">{item.label}{item.required && <span className="text-error"> *</span>}</span>
-            </label>
-          );
-        }
-        if (item.type === "text") {
-          return (
-            <div key={item.key} className="form-control">
-              <label className="label"><span className="label-text text-sm">{item.label}{item.required && <span className="text-error"> *</span>}</span></label>
-              <input type="text" className="input input-bordered input-sm" value={(value as string) || ""} onChange={(e) => setValue(e.target.value)} />
-            </div>
-          );
-        }
-        if (item.type === "number") {
-          return (
-            <div key={item.key} className="form-control">
-              <label className="label">
-                <span className="label-text text-sm">{item.label}{item.unit ? `（${item.unit}）` : ""}{item.required && <span className="text-error"> *</span>}</span>
-              </label>
-              <input
-                type="number"
-                className="input input-bordered input-sm"
-                value={value === undefined || value === null ? "" : (value as number)}
-                onChange={(e) => setValue(e.target.value === "" ? "" : Number(e.target.value))}
-              />
-            </div>
-          );
-        }
-        if (item.type === "location") {
-          return <ChecklistLocationField key={item.key} item={item} value={value} onChange={setValue} />;
-        }
-        return (
-          <ChecklistPhotoField key={item.key} item={item} rentalNumber={rentalNumber} value={value} onChange={setValue} />
-        );
-      })}
-    </div>
-  );
-}
-
-function ChecklistPhotoField({ item, rentalNumber, value, onChange }: {
-  item: ChecklistItem;
-  rentalNumber: number;
-  value: unknown;
-  onChange: (v: string[]) => void;
-}) {
-  const [uploading, setUploading] = useState(false);
-  const ids = Array.isArray(value) ? (value as string[]) : [];
-  const max = item.maxCount || 0;
-
-  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-    setUploading(true);
-    try {
-      const resized = await resizeImage(file, 1600);
-      const form = new FormData();
-      form.append("file", resized, file.name || "photo.jpg");
-      form.append("rental_number", String(rentalNumber));
-      form.append("item_key", item.key);
-      const { data } = await apiClient.post("/api/checklist-photos", form, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      onChange([...ids, data.id]);
-    } catch { /* best-effort — user can just try uploading again */ }
-    finally { setUploading(false); }
-  };
-
-  return (
-    <div className="form-control">
-      <label className="label">
-        <span className="label-text text-sm">{item.label}{item.required && <span className="text-error"> *</span>}</span>
-      </label>
-      <div className="flex flex-wrap gap-2 items-center">
-        {ids.map((id) => (
-          <div key={id} className="relative">
-            <img src={`/api/checklist-photos/${id}`} alt="" className="w-16 h-16 object-cover rounded border border-base-300" />
-            <button
-              type="button"
-              className="btn btn-error btn-xs btn-circle absolute -top-2 -right-2"
-              onClick={() => onChange(ids.filter((existing) => existing !== id))}
-            >
-              <X size={10} />
-            </button>
-          </div>
-        ))}
-        {(max === 0 || ids.length < max) && (
-          <label className="btn btn-outline btn-sm gap-1 cursor-pointer">
-            {uploading ? <span className="loading loading-spinner loading-xs" /> : <Camera size={14} />} 拍照/上傳
-            <input type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFile} disabled={uploading} />
-          </label>
-        )}
-      </div>
-    </div>
-  );
+  return data.id;
 }
 
 export function Rentals() {
@@ -1226,6 +900,7 @@ export function Rentals() {
                 values={returnValues}
                 onChange={(key, v) => setReturnValues((prev) => ({ ...prev, [key]: v }))}
                 rentalNumber={returnGroup!.rental_number}
+                onUploadPhoto={uploadChecklistPhoto}
               />
             </div>
           )}
@@ -1323,6 +998,7 @@ export function Rentals() {
                 values={dailyReportValues}
                 onChange={(key, v) => setDailyReportValues((prev) => ({ ...prev, [key]: v }))}
                 rentalNumber={dailyReportGroup!.rental_number}
+                onUploadPhoto={uploadChecklistPhoto}
               />
             )}
           </div>

@@ -27,8 +27,20 @@ import { AssetList } from "./pages/AssetList";
 import { Notifications } from "./pages/Notifications";
 import { Settings } from "./pages/Settings";
 import { DEPTemplates } from "./pages/DEPTemplates";
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense, lazy } from "react";
 import { useParams } from "react-router";
+import { wireAutoFlush } from "./lib/offlineQueue";
+
+// Lazy-loaded so the mobile self-service bundle (and its PWA-cached app
+// shell) stays a small, separate chunk from the desktop admin app — a phone
+// only ever needs this piece offline, never the AG Grid-heavy desktop pages.
+const MobileHome = lazy(() => import("./pages/mobile/MobileHome").then((m) => ({ default: m.MobileHome })));
+const MobileDailyReport = lazy(() => import("./pages/mobile/MobileDailyReport").then((m) => ({ default: m.MobileDailyReport })));
+const MobileSubmitReturn = lazy(() => import("./pages/mobile/MobileSubmitReturn").then((m) => ({ default: m.MobileSubmitReturn })));
+
+function MobileFallback() {
+  return <div className="min-h-screen flex items-center justify-center bg-base-200"><span className="loading loading-spinner loading-lg text-primary"></span></div>;
+}
 
 function DeviceRedirect() {
   const { udid } = useParams();
@@ -64,6 +76,12 @@ function AppRoutes() {
       .catch(() => setInitialized(true));
   }, []);
 
+  // Retries the mobile self-service pages' offline queue on reconnect/app
+  // foreground regardless of which route is active — an installed PWA can
+  // reopen straight onto /m/rentals, but a desktop session left mid-sync
+  // should still catch up too.
+  useEffect(() => { if (isAuthenticated) wireAutoFlush(); }, [isAuthenticated]);
+
   if (initialized === null || isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-base-200">
@@ -85,6 +103,40 @@ function AppRoutes() {
     <Routes>
       <Route path="/setup" element={<Navigate to="/login" replace />} />
       <Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" /> : <Login />} />
+
+      {/* Mobile self-service (借用人手機版): no sidebar/Layout, own minimal
+          chrome (MobileShell) — reached from a home-screen PWA install, so
+          it deliberately doesn't share the desktop admin app's routes. */}
+      <Route
+        path="/m/rentals"
+        element={
+          <ProtectedRoute>
+            <ModuleGuard module="rental" minLevel="requester">
+              <Suspense fallback={<MobileFallback />}><MobileHome /></Suspense>
+            </ModuleGuard>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/m/rentals/:rentalId/daily-report"
+        element={
+          <ProtectedRoute>
+            <ModuleGuard module="rental" minLevel="requester">
+              <Suspense fallback={<MobileFallback />}><MobileDailyReport /></Suspense>
+            </ModuleGuard>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/m/rentals/:rentalId/submit-return"
+        element={
+          <ProtectedRoute>
+            <ModuleGuard module="rental" minLevel="requester">
+              <Suspense fallback={<MobileFallback />}><MobileSubmitReturn /></Suspense>
+            </ModuleGuard>
+          </ProtectedRoute>
+        }
+      />
       <Route
         element={
           <ProtectedRoute>
