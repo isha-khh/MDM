@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import apiClient from "../lib/apiClient";
 import { useDialog } from "../components/DialogProvider";
-import { Plus, Trash2, Edit3, Save, X, ChevronRight, FolderTree, ClipboardList, ArrowUp, ArrowDown } from "lucide-react";
+import { Plus, Trash2, Edit3, Save, X, ChevronRight, FolderTree, ClipboardList, ArrowUp, ArrowDown, AlertTriangle } from "lucide-react";
 
 interface Category {
   id: string;
@@ -157,6 +157,37 @@ export function Categories() {
     finally { setChecklistSaving(false); }
   };
 
+  // 租借注意事項編輯（Phase 3）——提交租借申請前需借用人同意；沒有全域預設，
+  // 分類鏈上都沒設定就代表不用跳出來。
+  const [noticeCategoryId, setNoticeCategoryId] = useState<string | null>(null);
+  const [noticeContent, setNoticeContent] = useState("");
+  const [noticeIsExplicit, setNoticeIsExplicit] = useState(false);
+  const [noticeLoading, setNoticeLoading] = useState(false);
+  const [noticeSaving, setNoticeSaving] = useState(false);
+
+  const openNoticeEditor = async (cat: Category) => {
+    setNoticeCategoryId(cat.id);
+    setNoticeLoading(true);
+    try {
+      const { data } = await apiClient.get(`/api/categories/${cat.id}/notice`);
+      setNoticeContent(data.content || "");
+      setNoticeIsExplicit(!!data.is_explicit);
+    } catch {
+      setNoticeContent("");
+      setNoticeIsExplicit(false);
+    } finally { setNoticeLoading(false); }
+  };
+
+  const saveNotice = async () => {
+    if (!noticeCategoryId) return;
+    setNoticeSaving(true);
+    try {
+      await apiClient.put(`/api/categories/${noticeCategoryId}/notice`, { content: noticeContent.trim() });
+      setNoticeCategoryId(null);
+    } catch { await dialog.error("儲存失敗"); }
+    finally { setNoticeSaving(false); }
+  };
+
   // Build tree structure for rendering
   const tree = useMemo(() => {
     const roots = categories.filter((c) => !c.parent_id);
@@ -240,6 +271,13 @@ export function Categories() {
                     title="編輯此分類歸還時的檢查清單（未設定時套用上層分類或全域預設）"
                   >
                     <ClipboardList size={12} /> 歸還清單
+                  </button>
+                  <button
+                    onClick={() => openNoticeEditor(cat)}
+                    className="btn btn-ghost btn-xs gap-1"
+                    title="編輯此分類的租借注意事項（提交申請前需借用人閱讀同意；未設定時不套用任何上層的話則不會跳出）"
+                  >
+                    <AlertTriangle size={12} /> 注意事項
                   </button>
                   <label
                     className="flex items-center gap-1 text-xs opacity-70 cursor-pointer whitespace-nowrap"
@@ -435,6 +473,42 @@ export function Categories() {
         </div>
         <form method="dialog" className="modal-backdrop">
           <button onClick={() => setChecklistCategoryId(null)}>close</button>
+        </form>
+      </dialog>
+
+      {/* Notice editor (Phase 3) */}
+      <dialog className={`modal ${noticeCategoryId ? "modal-open" : ""}`}>
+        <div className="modal-box max-w-xl">
+          <h3 className="font-bold text-lg">
+            租借注意事項 — {categories.find((c) => c.id === noticeCategoryId)?.name}
+          </h3>
+          <p className="text-sm text-base-content/60 mt-1">
+            {noticeIsExplicit
+              ? "此分類已有自己的設定"
+              : "此分類目前沒有設定（也沒有從上層分類繼承到），送出租借申請時不會跳出提醒；儲存非空白內容後才會開始套用"}
+          </p>
+
+          {noticeLoading ? (
+            <div className="flex justify-center py-8"><span className="loading loading-spinner"></span></div>
+          ) : (
+            <textarea
+              value={noticeContent}
+              onChange={(e) => setNoticeContent(e.target.value)}
+              placeholder="例如：使用車輛前請確認油量、行照隨車攜帶，發生事故請立即通知保管人…（留空 = 清除此分類自己的設定，改回繼承上層或不套用）"
+              className="textarea textarea-bordered w-full mt-4 min-h-40"
+            />
+          )}
+
+          <div className="modal-action">
+            <button className="btn btn-sm" onClick={() => setNoticeCategoryId(null)}>{t("common.cancel")}</button>
+            <button className="btn btn-primary btn-sm gap-1" disabled={noticeSaving || noticeLoading} onClick={saveNotice}>
+              {noticeSaving && <span className="loading loading-spinner loading-xs"></span>}
+              <Save size={14} /> 儲存
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop">
+          <button onClick={() => setNoticeCategoryId(null)}>close</button>
         </form>
       </dialog>
     </div>

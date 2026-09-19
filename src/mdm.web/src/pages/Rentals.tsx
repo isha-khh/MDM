@@ -394,7 +394,7 @@ export function Rentals() {
   // shown proactively here so the user isn't surprised by a rejected submit.
   const isMultiDay = !!expectedReturn && expectedReturn !== borrowDate;
 
-  const handleCreate = async () => {
+  const submitCreate = async () => {
     setCreating(true);
     try {
       const common = {
@@ -423,6 +423,61 @@ export function Rentals() {
       const resp = (err as { response?: { data?: { error?: string; devices?: string[] } } })?.response?.data;
       await dialog.error(resp?.error || (err instanceof Error ? err.message : "建立失敗"), resp?.devices || []);
     } finally { setCreating(false); }
+  };
+
+  // 分類注意事項（Phase 3）——送出申請前先解析這批資產涉及的分類是否有尚未
+  // 同意過的注意事項，有的話攔截提交、跳出彙整 dialog，全部勾選同意後才真的
+  // 呼叫 submitCreate() 並記錄同意紀錄。
+  const [noticePending, setNoticePending] = useState<{ category_id: string; content: string }[]>([]);
+  const [noticeAgreed, setNoticeAgreed] = useState<Record<string, boolean>>({});
+  const [noticeChecking, setNoticeChecking] = useState(false);
+  const [noticeSubmitting, setNoticeSubmitting] = useState(false);
+
+  const resolveCreateCategoryIds = async (): Promise<string[]> => {
+    if (createTab === "category") {
+      return Array.from(new Set(catLines.map((l) => l.categoryId).filter((v): v is string => !!v)));
+    }
+    try {
+      const { data } = await apiClient.get("/api/rental-pickable-assets");
+      const byId = new Map<string, string | null>(
+        (data.assets || []).map((a: { asset_id: string; category_id: string | null }) => [a.asset_id, a.category_id]),
+      );
+      return Array.from(new Set(selectedAssets.map((id) => byId.get(id)).filter((v): v is string => !!v)));
+    } catch { return []; }
+  };
+
+  const handleCreateClick = async () => {
+    setNoticeChecking(true);
+    try {
+      const categoryIds = await resolveCreateCategoryIds();
+      if (categoryIds.length === 0) { await submitCreate(); return; }
+      const { data } = await apiClient.get("/api/category-notices/resolve", {
+        params: { category_ids: categoryIds.join(",") },
+      });
+      const pending: { category_id: string; content: string }[] = data.pending || [];
+      if (pending.length === 0) {
+        await submitCreate();
+      } else {
+        setNoticePending(pending);
+        setNoticeAgreed({});
+      }
+    } catch {
+      await submitCreate();
+    } finally { setNoticeChecking(false); }
+  };
+
+  const allNoticesAgreed = noticePending.every((n) => noticeAgreed[n.category_id]);
+
+  const confirmNoticesAndCreate = async () => {
+    setNoticeSubmitting(true);
+    try {
+      await apiClient.post("/api/category-notice-acks", { category_ids: noticePending.map((n) => n.category_id) });
+      setNoticePending([]);
+      await submitCreate();
+    } catch (err: unknown) {
+      const resp = (err as { response?: { data?: { error?: string } } })?.response?.data;
+      await dialog.error(resp?.error || "同意紀錄寫入失敗");
+    } finally { setNoticeSubmitting(false); }
   };
 
   // Return dialog state — checklist items are resolved dynamically per the
@@ -937,11 +992,11 @@ export function Rentals() {
               </div>
               <div className="flex gap-2">
                 <button
-                  onClick={handleCreate}
-                  disabled={creating || !borrowerId || (createTab === "asset" ? selectedAssets.length === 0 : catLines.filter((l) => l.categoryId && l.quantity >= 1).length === 0)}
+                  onClick={handleCreateClick}
+                  disabled={creating || noticeChecking || !borrowerId || (createTab === "asset" ? selectedAssets.length === 0 : catLines.filter((l) => l.categoryId && l.quantity >= 1).length === 0)}
                   className="btn btn-success btn-sm gap-1"
                 >
-                  {creating && <span className="loading loading-spinner loading-xs"></span>}
+                  {(creating || noticeChecking) && <span className="loading loading-spinner loading-xs"></span>}
                   提交申請
                 </button>
                 <button onClick={() => { setShowCreate(false); resetCreateForm(); }} className="btn btn-ghost btn-sm">{t("common.cancel")}</button>
@@ -1206,6 +1261,46 @@ export function Rentals() {
         </div>
         <form method="dialog" className="modal-backdrop">
           <button onClick={() => setDailyReportGroup(null)}>close</button>
+        </form>
+      </dialog>
+
+      {/* 分類注意事項同意 dialog（Phase 3）——攔截提交，須全部勾選同意才能繼續 */}
+      <dialog className={`modal ${noticePending.length > 0 ? "modal-open" : ""}`}>
+        <div className="modal-box max-w-xl">
+          <h3 className="font-bold text-lg">請詳閱以下注意事項</h3>
+          <p className="text-sm text-base-content/60 mt-1">此次租借涉及的分類設有使用須知，需全部閱讀並同意才能送出申請</p>
+
+          <div className="space-y-3 mt-4 max-h-[50vh] overflow-y-auto">
+            {noticePending.map((n) => (
+              <div key={n.category_id} className="p-3 rounded border border-base-300">
+                <p className="text-sm whitespace-pre-wrap">{n.content}</p>
+                <label className="flex items-center gap-2 text-sm mt-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="checkbox checkbox-sm"
+                    checked={!!noticeAgreed[n.category_id]}
+                    onChange={(e) => setNoticeAgreed((prev) => ({ ...prev, [n.category_id]: e.target.checked }))}
+                  />
+                  我已閱讀並同意
+                </label>
+              </div>
+            ))}
+          </div>
+
+          <div className="modal-action">
+            <button className="btn btn-sm" onClick={() => setNoticePending([])}>{t("common.cancel")}</button>
+            <button
+              className="btn btn-primary btn-sm gap-1"
+              disabled={noticeSubmitting || !allNoticesAgreed}
+              onClick={confirmNoticesAndCreate}
+            >
+              {noticeSubmitting && <span className="loading loading-spinner loading-xs"></span>}
+              同意並送出申請
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop">
+          <button onClick={() => setNoticePending([])}>close</button>
         </form>
       </dialog>
     </div>

@@ -19,10 +19,11 @@ type CategoryController struct {
 	auth           *middleware.AuthHelper
 	rentalRuleRepo *postgres.CategoryRentalRuleRepo
 	templateRepo   *postgres.ChecklistTemplateRepo
+	noticeRepo     *postgres.CategoryNoticeRepo
 }
 
-func NewCategoryController(categoryRepo port.CategoryRepository, auth *middleware.AuthHelper, rentalRuleRepo *postgres.CategoryRentalRuleRepo, templateRepo *postgres.ChecklistTemplateRepo) *CategoryController {
-	return &CategoryController{categoryRepo: categoryRepo, auth: auth, rentalRuleRepo: rentalRuleRepo, templateRepo: templateRepo}
+func NewCategoryController(categoryRepo port.CategoryRepository, auth *middleware.AuthHelper, rentalRuleRepo *postgres.CategoryRentalRuleRepo, templateRepo *postgres.ChecklistTemplateRepo, noticeRepo *postgres.CategoryNoticeRepo) *CategoryController {
+	return &CategoryController{categoryRepo: categoryRepo, auth: auth, rentalRuleRepo: rentalRuleRepo, templateRepo: templateRepo, noticeRepo: noticeRepo}
 }
 
 func (c *CategoryController) RegisterRoutes(mux *http.ServeMux) {
@@ -152,6 +153,10 @@ func (c *CategoryController) handleCategoryByID(w http.ResponseWriter, r *http.R
 		c.handleCategoryChecklistTemplate(w, r, claims, id)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "notice" {
+		c.handleCategoryNotice(w, r, claims, id)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodPut:
@@ -252,6 +257,60 @@ func (c *CategoryController) handleCategoryChecklistTemplate(w http.ResponseWrit
 			return
 		}
 		if err := c.templateRepo.Upsert(r.Context(), &categoryID, body.Items, claims.UserID); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		writeOK(w)
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+// handleCategoryNotice godoc
+// @Summary 取得/設定分類的租借注意事項（提交申請前需同意）
+// @Tags Category
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path string true "分類 ID"
+// @Success 200 {object} map[string]interface{}
+// @Router /api/categories/{id}/notice [get]
+// @Router /api/categories/{id}/notice [put]
+func (c *CategoryController) handleCategoryNotice(w http.ResponseWriter, r *http.Request, claims *middleware.Claims, categoryID string) {
+	switch r.Method {
+	case http.MethodGet:
+		notice, err := c.noticeRepo.Get(r.Context(), categoryID)
+		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			// No explicit notice at this category — report empty content and
+			// is_explicit:false so the maintenance UI can show "inherits from
+			// parent / no notice" rather than an empty saved notice.
+			writeJSON(w, map[string]interface{}{"category_id": categoryID, "content": "", "is_explicit": false})
+			return
+		}
+		writeJSON(w, map[string]interface{}{"category_id": categoryID, "content": notice.Content, "is_explicit": true})
+
+	case http.MethodPut:
+		var body struct {
+			Content string `json:"content"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		// An empty body clears this category's own override so it falls back
+		// to whatever its ancestor chain resolves to (or nothing).
+		var err error
+		if strings.TrimSpace(body.Content) == "" {
+			err = c.noticeRepo.Delete(r.Context(), categoryID)
+		} else {
+			err = c.noticeRepo.Upsert(r.Context(), categoryID, body.Content, claims.UserID)
+		}
+		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}

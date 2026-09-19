@@ -94,3 +94,6 @@ var Migration030SQL string
 
 //go:embed migrations/031_asset_last_return_location.up.sql
 var Migration031SQL string
+
+//go:embed migrations/032_category_notices.up.sql
+var Migration032SQL string
