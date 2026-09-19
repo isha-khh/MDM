@@ -85,3 +85,6 @@ var Migration027SQL string
 
 //go:embed migrations/028_category_rental_rules.up.sql
 var Migration028SQL string
+
+//go:embed migrations/029_checklist_templates.up.sql
+var Migration029SQL string

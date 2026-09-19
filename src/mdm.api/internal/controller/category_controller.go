@@ -18,10 +18,11 @@ type CategoryController struct {
 	categoryRepo   port.CategoryRepository
 	auth           *middleware.AuthHelper
 	rentalRuleRepo *postgres.CategoryRentalRuleRepo
+	templateRepo   *postgres.ChecklistTemplateRepo
 }
 
-func NewCategoryController(categoryRepo port.CategoryRepository, auth *middleware.AuthHelper, rentalRuleRepo *postgres.CategoryRentalRuleRepo) *CategoryController {
-	return &CategoryController{categoryRepo: categoryRepo, auth: auth, rentalRuleRepo: rentalRuleRepo}
+func NewCategoryController(categoryRepo port.CategoryRepository, auth *middleware.AuthHelper, rentalRuleRepo *postgres.CategoryRentalRuleRepo, templateRepo *postgres.ChecklistTemplateRepo) *CategoryController {
+	return &CategoryController{categoryRepo: categoryRepo, auth: auth, rentalRuleRepo: rentalRuleRepo, templateRepo: templateRepo}
 }
 
 func (c *CategoryController) RegisterRoutes(mux *http.ServeMux) {
@@ -147,6 +148,10 @@ func (c *CategoryController) handleCategoryByID(w http.ResponseWriter, r *http.R
 		c.handleCategoryRentalRule(w, r, claims, id)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "checklist-template" {
+		c.handleCategoryChecklistTemplate(w, r, claims, id)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodPut:
@@ -201,6 +206,52 @@ func (c *CategoryController) handleCategoryRentalRule(w http.ResponseWriter, r *
 			return
 		}
 		if err := c.rentalRuleRepo.Upsert(r.Context(), categoryID, body.DailyTrackingRequired, claims.UserID); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		writeOK(w)
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+// handleCategoryChecklistTemplate godoc
+// @Summary 取得/設定分類的歸還檢查清單範本
+// @Tags Category
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path string true "分類 ID"
+// @Success 200 {object} map[string]interface{}
+// @Router /api/categories/{id}/checklist-template [get]
+// @Router /api/categories/{id}/checklist-template [put]
+func (c *CategoryController) handleCategoryChecklistTemplate(w http.ResponseWriter, r *http.Request, claims *middleware.Claims, categoryID string) {
+	switch r.Method {
+	case http.MethodGet:
+		tpl, err := c.templateRepo.Get(r.Context(), &categoryID)
+		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			// No explicit template at this category — report empty items and
+			// is_explicit:false so the maintenance UI can show "inherits from
+			// parent/default" rather than an empty saved template.
+			writeJSON(w, map[string]interface{}{"category_id": categoryID, "items": []domain.ChecklistItem{}, "is_explicit": false})
+			return
+		}
+		writeJSON(w, map[string]interface{}{"category_id": categoryID, "items": tpl.Items, "is_explicit": true})
+
+	case http.MethodPut:
+		var body struct {
+			Items []domain.ChecklistItem `json:"items"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if err := c.templateRepo.Upsert(r.Context(), &categoryID, body.Items, claims.UserID); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
