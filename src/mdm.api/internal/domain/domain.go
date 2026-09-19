@@ -146,6 +146,12 @@ type PickableAsset struct {
 	AssetStatus  string
 	CategoryID   *string
 	CategoryName string
+	// LastReturnLocation/LastReturnAt (Phase 2c of 租借 2.1) — set when a
+	// rental's stage-2 verify checklist included a "location" type answer.
+	// Separate from Asset.Location (the manually-maintained storage
+	// location); nil/zero when never captured or not applicable.
+	LastReturnLocation map[string]interface{}
+	LastReturnAt       *time.Time
 }
 
 // AssetCustodyLog records every change to an asset's custodian.
@@ -210,7 +216,7 @@ type Rental struct {
 	ApproverName    string
 	CustodianID     *string
 	CustodianName   string
-	Status          string // pending, approved, active, returned, rejected
+	Status          string // pending, approved, active, pending_return, returned, rejected
 	Purpose         string
 	BorrowDate      time.Time
 	ExpectedReturn  *time.Time
@@ -218,8 +224,19 @@ type Rental struct {
 	Notes           string
 	RentalNumber    int
 	IsArchived      bool
-	ReturnChecklist map[string]interface{}
+	ReturnChecklist map[string]interface{} // final version, written at stage 2 (verify)
 	ReturnNotes     string
+	// ReturnChecklistReported is the borrower's stage-1 submission (see
+	// "submit-return") — kept separate from ReturnChecklist (the custodian's
+	// stage-2, verified version) so both are available for audit comparison.
+	ReturnChecklistReported map[string]interface{}
+	ReturnReportedBy        *string
+	ReturnReportedAt        *time.Time
+	ReturnVerifiedBy        *string
+	// CrossDayReason is required at stage-2 verify when today (actual_return)
+	// is later than ExpectedReturn for a daily_tracking_required rental —
+	// not a hard block, just an audited explanation for the overrun.
+	CrossDayReason string
 	// MultiDayReason is the required justification when the rental spans more
 	// than one calendar day AND at least one involved asset's category is
 	// flagged daily_tracking_required (see CategoryRentalRule) — e.g. a
@@ -263,6 +280,93 @@ type RentalDailyReport struct {
 	BackfillReason string
 	ReportedBy     *string
 	ReportedAt     time.Time
+}
+
+// ChecklistItem is one field of a dynamic return-checklist template.
+// Type determines how the frontend renders it and what shape its answer
+// takes in a rentals.return_checklist / RentalDailyReport.Checklist blob:
+//   - "boolean": a checkbox; answer is true/false.
+//   - "text": a free-text input; answer is a string.
+//   - "number": a numeric input; answer is a number. Unit is display-only
+//     (e.g. "km").
+//   - "location": a "capture current position" button (browser Geolocation
+//     API); answer is {"lat":..,"lng":..,"accuracy":..} or, if geolocation
+//     failed/was denied, a manually-typed {"address":".."}.
+//   - "photo": a camera/file-upload button; answer is an array of
+//     ChecklistPhoto IDs. MaxCount caps how many (0 = unlimited).
+type ChecklistItem struct {
+	Key      string `json:"key"`
+	Label    string `json:"label"`
+	Type     string `json:"type"`
+	Required bool   `json:"required"`
+	Unit     string `json:"unit,omitempty"`
+	MaxCount int    `json:"maxCount,omitempty"`
+}
+
+// ChecklistTemplate is a category-bound (or, when CategoryID is nil, the
+// global default) ordered list of ChecklistItem. Resolved via the same
+// "walk up categories.parent_id, first explicit row wins, else fall through
+// to the global default" inheritance as CategoryRentalRule.
+type ChecklistTemplate struct {
+	ID         string
+	CategoryID *string
+	Items      []ChecklistItem
+	UpdatedBy  *string
+	UpdatedAt  time.Time
+}
+
+// ChecklistPhoto is the binary content behind one "photo" type checklist
+// answer. See checklist_photos migration comment for why it's keyed by
+// RentalNumber rather than a single Rental row's ID.
+type ChecklistPhoto struct {
+	ID           string
+	RentalNumber int
+	ItemKey      string
+	Content      []byte
+	ContentType  string
+	Size         int
+	UploadedBy   *string
+	CreatedAt    time.Time
+}
+
+// CategoryNotice is a category-bound "please read and agree" notice shown to
+// the borrower when submitting a rental request that touches this category.
+// Resolved with the same "walk up categories.parent_id, first explicit row
+// wins" inheritance as CategoryRentalRule/ChecklistTemplate, but with no
+// global-default fallback: a category with nothing set anywhere in its
+// ancestor chain simply has no notice to show.
+type CategoryNotice struct {
+	CategoryID string
+	Content    string
+	UpdatedBy  *string
+	UpdatedAt  time.Time
+}
+
+// CategoryNoticeImage is an image embedded inline in a CategoryNotice's
+// rich-text Content (referenced by an <img> tag pointing at
+// /api/category-notice-images/{ID}). Not tied to a specific notice row by
+// foreign key — CategoryID is just which category's editor uploaded it, so
+// an upload during editing works before the notice text itself is saved.
+type CategoryNoticeImage struct {
+	ID          string
+	CategoryID  *string
+	Content     []byte
+	ContentType string
+	Size        int
+	UploadedBy  *string
+	CreatedAt   time.Time
+}
+
+// CategoryNoticeAck records that UserID has agreed to CategoryID's notice as
+// it read at the time (ContentHash), so a later resolve can tell "already
+// agreed, unchanged" apart from "agreed to a since-edited version" (which
+// must be shown again) without keeping a second copy of the text.
+type CategoryNoticeAck struct {
+	ID          string
+	UserID      string
+	CategoryID  string
+	ContentHash string
+	AckedAt     time.Time
 }
 
 // --- Maintenance (Equipment dispatch) Management ---

@@ -196,9 +196,21 @@ type swagArchiveReq struct {
 	IDs []string `json:"ids"`
 }
 
+// swagSubmitReturnReq is the body for POST /api/rentals/{id}/submit-return
+// (stage 1 — the borrower reports while the devices are still with them).
+type swagSubmitReturnReq struct {
+	Notes     string                 `json:"notes"`
+	Checklist map[string]interface{} `json:"checklist"`
+}
+
+// swagReturnReq is the body for POST /api/rentals/{id}/return (stage 2 —
+// the custodian/admin verifies, optionally correcting, the stage-1 report).
 type swagReturnReq struct {
 	Notes     string                 `json:"notes"`
 	Checklist map[string]interface{} `json:"checklist"`
+	// CrossDayReason is required when actual return is later than
+	// expected_return for a daily_tracking_required rental.
+	CrossDayReason string `json:"cross_day_reason"`
 }
 
 // -- Maintenance --

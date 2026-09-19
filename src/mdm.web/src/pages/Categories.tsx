@@ -2,7 +2,8 @@ import { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import apiClient from "../lib/apiClient";
 import { useDialog } from "../components/DialogProvider";
-import { Plus, Trash2, Edit3, Save, X, ChevronRight, FolderTree } from "lucide-react";
+import { RichTextEditor } from "../components/RichTextEditor";
+import { Plus, Trash2, Edit3, Save, X, ChevronRight, FolderTree, ClipboardList, ArrowUp, ArrowDown, AlertTriangle } from "lucide-react";
 
 interface Category {
   id: string;
@@ -10,6 +11,35 @@ interface Category {
   name: string;
   level: number;
   sort_order: number;
+}
+
+type ChecklistItemType = "boolean" | "text" | "number" | "location" | "photo";
+
+interface ChecklistItem {
+  key: string;
+  label: string;
+  type: ChecklistItemType;
+  required: boolean;
+  unit?: string;
+  maxCount?: number;
+}
+
+const CHECKLIST_TYPE_LABELS: Record<ChecklistItemType, string> = {
+  boolean: "勾選",
+  text: "文字",
+  number: "數值",
+  location: "定位",
+  photo: "照片",
+};
+
+// Slugify a label into a stable, ASCII item key; falls back to a counter
+// suffix on collision so two similarly-named items don't clash.
+function slugifyKey(label: string, existing: Set<string>): string {
+  const base = label.trim().toLowerCase().replace(/[^a-z0-9一-鿿]+/g, "_").replace(/^_+|_+$/g, "") || "item";
+  let key = base;
+  let i = 2;
+  while (existing.has(key)) { key = `${base}_${i++}`; }
+  return key;
 }
 
 export function Categories() {
@@ -59,6 +89,121 @@ export function Categories() {
       setRentalRules((prev) => ({ ...prev, [id]: value }));
     } catch { await dialog.error("設定失敗"); }
     finally { setSavingRuleId(null); }
+  };
+
+  // 歸還檢查清單範本編輯（Phase 2a）
+  const [checklistCategoryId, setChecklistCategoryId] = useState<string | null>(null);
+  const [checklistItems, setChecklistItems] = useState<ChecklistItem[]>([]);
+  const [checklistIsExplicit, setChecklistIsExplicit] = useState(false);
+  const [checklistLoading, setChecklistLoading] = useState(false);
+  const [checklistSaving, setChecklistSaving] = useState(false);
+
+  const openChecklistEditor = async (cat: Category) => {
+    setChecklistCategoryId(cat.id);
+    setChecklistLoading(true);
+    try {
+      const { data } = await apiClient.get(`/api/categories/${cat.id}/checklist-template`);
+      setChecklistItems(data.items || []);
+      setChecklistIsExplicit(!!data.is_explicit);
+    } catch {
+      setChecklistItems([]);
+      setChecklistIsExplicit(false);
+    } finally { setChecklistLoading(false); }
+  };
+
+  const addChecklistItem = () => {
+    setChecklistItems((prev) => [
+      ...prev,
+      { key: slugifyKey("項目", new Set(prev.map((i) => i.key))), label: "", type: "boolean", required: true },
+    ]);
+  };
+
+  const updateChecklistItem = (idx: number, patch: Partial<ChecklistItem>) => {
+    setChecklistItems((prev) => prev.map((it, i) => {
+      if (i !== idx) return it;
+      const next = { ...it, ...patch };
+      // Re-derive the key from the label when the label changes and the key
+      // still looks auto-generated (i.e. the admin hasn't customized it) —
+      // keeps keys readable without requiring manual slug editing.
+      if (patch.label !== undefined) {
+        const others = new Set(prev.filter((_, j) => j !== idx).map((o) => o.key));
+        next.key = slugifyKey(patch.label, others);
+      }
+      return next;
+    }));
+  };
+
+  const removeChecklistItem = (idx: number) => {
+    setChecklistItems((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const moveChecklistItem = (idx: number, dir: -1 | 1) => {
+    setChecklistItems((prev) => {
+      const next = [...prev];
+      const target = idx + dir;
+      if (target < 0 || target >= next.length) return prev;
+      [next[idx], next[target]] = [next[target], next[idx]];
+      return next;
+    });
+  };
+
+  const saveChecklistTemplate = async () => {
+    if (!checklistCategoryId) return;
+    const cleaned = checklistItems.filter((it) => it.label.trim() !== "");
+    setChecklistSaving(true);
+    try {
+      await apiClient.put(`/api/categories/${checklistCategoryId}/checklist-template`, { items: cleaned });
+      setChecklistCategoryId(null);
+    } catch { await dialog.error("儲存失敗"); }
+    finally { setChecklistSaving(false); }
+  };
+
+  // 租借注意事項編輯（Phase 3）——提交租借申請前需借用人同意；沒有全域預設，
+  // 分類鏈上都沒設定就代表不用跳出來。
+  const [noticeCategoryId, setNoticeCategoryId] = useState<string | null>(null);
+  const [noticeContent, setNoticeContent] = useState("");
+  const [noticeIsExplicit, setNoticeIsExplicit] = useState(false);
+  const [noticeLoading, setNoticeLoading] = useState(false);
+  const [noticeSaving, setNoticeSaving] = useState(false);
+
+  const openNoticeEditor = async (cat: Category) => {
+    setNoticeCategoryId(cat.id);
+    setNoticeLoading(true);
+    try {
+      const { data } = await apiClient.get(`/api/categories/${cat.id}/notice`);
+      setNoticeContent(data.content || "");
+      setNoticeIsExplicit(!!data.is_explicit);
+    } catch {
+      setNoticeContent("");
+      setNoticeIsExplicit(false);
+    } finally { setNoticeLoading(false); }
+  };
+
+  // The rich text editor always emits real markup (e.g. "<p></p>") even when
+  // visually empty, so "did the admin actually clear this" needs to check
+  // for leftover text/images rather than just checking for an empty string.
+  const isRichTextEmpty = (html: string) =>
+    html.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim() === "" && !/<img[\s/]/i.test(html);
+
+  const saveNotice = async () => {
+    if (!noticeCategoryId) return;
+    setNoticeSaving(true);
+    try {
+      const content = isRichTextEmpty(noticeContent) ? "" : noticeContent;
+      await apiClient.put(`/api/categories/${noticeCategoryId}/notice`, { content });
+      setNoticeCategoryId(null);
+    } catch { await dialog.error("儲存失敗"); }
+    finally { setNoticeSaving(false); }
+  };
+
+  const uploadNoticeImage = async (file: File): Promise<string> => {
+    const form = new FormData();
+    form.append("file", file);
+    if (noticeCategoryId) form.append("category_id", noticeCategoryId);
+    const { data } = await apiClient.post("/api/category-notice-images", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+    return `/api/category-notice-images/${data.id}`;
   };
 
   // Build tree structure for rendering
@@ -137,19 +282,35 @@ export function Categories() {
                 {cat.name}
               </span>
               {children.length === 0 && (
-                <label
-                  className="flex items-center gap-1 text-xs opacity-70 cursor-pointer whitespace-nowrap"
-                  title="開啟後：跨日租借需填寫說明，且租借期間每天各自要填一份檢查清單（例如車輛里程），用於逐日記錄"
-                >
-                  <input
-                    type="checkbox"
-                    className="toggle toggle-xs"
-                    checked={!!rentalRules[cat.id]}
-                    disabled={savingRuleId === cat.id}
-                    onChange={(e) => toggleDailyTracking(cat.id, e.target.checked)}
-                  />
-                  逐日追蹤
-                </label>
+                <>
+                  <button
+                    onClick={() => openChecklistEditor(cat)}
+                    className="btn btn-ghost btn-xs gap-1"
+                    title="編輯此分類歸還時的檢查清單（未設定時套用上層分類或全域預設）"
+                  >
+                    <ClipboardList size={12} /> 歸還清單
+                  </button>
+                  <button
+                    onClick={() => openNoticeEditor(cat)}
+                    className="btn btn-ghost btn-xs gap-1"
+                    title="編輯此分類的租借注意事項（提交申請前需借用人閱讀同意；未設定時不套用任何上層的話則不會跳出）"
+                  >
+                    <AlertTriangle size={12} /> 注意事項
+                  </button>
+                  <label
+                    className="flex items-center gap-1 text-xs opacity-70 cursor-pointer whitespace-nowrap"
+                    title="開啟後：跨日租借需填寫說明，且租借期間每天各自要填一份檢查清單（例如車輛里程），用於逐日記錄"
+                  >
+                    <input
+                      type="checkbox"
+                      className="toggle toggle-xs"
+                      checked={!!rentalRules[cat.id]}
+                      disabled={savingRuleId === cat.id}
+                      onChange={(e) => toggleDailyTracking(cat.id, e.target.checked)}
+                    />
+                    逐日追蹤
+                  </label>
+                </>
               )}
               <div className="opacity-0 group-hover:opacity-100 flex gap-0.5 transition-opacity">
                 <button onClick={() => { setAddParentId(cat.id); setAddName(""); }} className="btn btn-ghost btn-xs" title="新增子分類">
@@ -240,6 +401,132 @@ export function Categories() {
           )}
         </div>
       </div>
+
+      {/* Checklist template editor (Phase 2a) */}
+      <dialog className={`modal ${checklistCategoryId ? "modal-open" : ""}`}>
+        <div className="modal-box max-w-2xl">
+          <h3 className="font-bold text-lg">
+            歸還檢查清單 — {categories.find((c) => c.id === checklistCategoryId)?.name}
+          </h3>
+          <p className="text-sm text-base-content/60 mt-1">
+            {checklistIsExplicit
+              ? "此分類已有自己的設定"
+              : "此分類目前套用上層分類或全域預設範本；儲存後會改用下面這份自己的設定"}
+          </p>
+
+          {checklistLoading ? (
+            <div className="flex justify-center py-8"><span className="loading loading-spinner"></span></div>
+          ) : (
+            <div className="space-y-2 mt-4 max-h-[50vh] overflow-y-auto">
+              {checklistItems.length === 0 && (
+                <p className="text-sm text-base-content/50 py-4 text-center">尚無項目，點擊下方「新增項目」開始</p>
+              )}
+              {checklistItems.map((item, idx) => (
+                <div key={idx} className="flex items-start gap-2 p-2 rounded border border-base-300">
+                  <div className="flex flex-col gap-0.5">
+                    <button className="btn btn-ghost btn-xs btn-square" disabled={idx === 0} onClick={() => moveChecklistItem(idx, -1)}><ArrowUp size={10} /></button>
+                    <button className="btn btn-ghost btn-xs btn-square" disabled={idx === checklistItems.length - 1} onClick={() => moveChecklistItem(idx, 1)}><ArrowDown size={10} /></button>
+                  </div>
+                  <div className="flex-1 grid grid-cols-1 sm:grid-cols-[1fr_100px_auto_auto] gap-2 items-center">
+                    <input
+                      type="text"
+                      value={item.label}
+                      onChange={(e) => updateChecklistItem(idx, { label: e.target.value })}
+                      placeholder="項目名稱，例如：里程數"
+                      className="input input-bordered input-sm"
+                    />
+                    <select
+                      value={item.type}
+                      onChange={(e) => updateChecklistItem(idx, { type: e.target.value as ChecklistItemType })}
+                      className="select select-bordered select-sm"
+                    >
+                      {(Object.keys(CHECKLIST_TYPE_LABELS) as ChecklistItemType[]).map((t) => (
+                        <option key={t} value={t}>{CHECKLIST_TYPE_LABELS[t]}</option>
+                      ))}
+                    </select>
+                    {item.type === "number" && (
+                      <input
+                        type="text"
+                        value={item.unit || ""}
+                        onChange={(e) => updateChecklistItem(idx, { unit: e.target.value })}
+                        placeholder="單位，如 km"
+                        className="input input-bordered input-sm w-24"
+                      />
+                    )}
+                    {item.type === "photo" && (
+                      <input
+                        type="number"
+                        min={1}
+                        value={item.maxCount || 1}
+                        onChange={(e) => updateChecklistItem(idx, { maxCount: Math.max(1, Number(e.target.value)) })}
+                        placeholder="張數上限"
+                        className="input input-bordered input-sm w-24"
+                        title="照片張數上限"
+                      />
+                    )}
+                    <label className="flex items-center gap-1 text-xs whitespace-nowrap">
+                      <input
+                        type="checkbox"
+                        className="checkbox checkbox-xs"
+                        checked={item.required}
+                        onChange={(e) => updateChecklistItem(idx, { required: e.target.checked })}
+                      />
+                      必填
+                    </label>
+                  </div>
+                  <button onClick={() => removeChecklistItem(idx)} className="btn btn-ghost btn-xs btn-square text-error"><Trash2 size={12} /></button>
+                </div>
+              ))}
+              <button onClick={addChecklistItem} className="btn btn-ghost btn-sm gap-1 mt-1"><Plus size={14} /> 新增項目</button>
+            </div>
+          )}
+
+          <div className="modal-action">
+            <button className="btn btn-sm" onClick={() => setChecklistCategoryId(null)}>{t("common.cancel")}</button>
+            <button className="btn btn-primary btn-sm gap-1" disabled={checklistSaving || checklistLoading} onClick={saveChecklistTemplate}>
+              {checklistSaving && <span className="loading loading-spinner loading-xs"></span>}
+              <Save size={14} /> 儲存
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop">
+          <button onClick={() => setChecklistCategoryId(null)}>close</button>
+        </form>
+      </dialog>
+
+      {/* Notice editor (Phase 3) */}
+      <dialog className={`modal ${noticeCategoryId ? "modal-open" : ""}`}>
+        <div className="modal-box max-w-xl">
+          <h3 className="font-bold text-lg">
+            租借注意事項 — {categories.find((c) => c.id === noticeCategoryId)?.name}
+          </h3>
+          <p className="text-sm text-base-content/60 mt-1">
+            {noticeIsExplicit
+              ? "此分類已有自己的設定"
+              : "此分類目前沒有設定（也沒有從上層分類繼承到），送出租借申請時不會跳出提醒；儲存非空白內容後才會開始套用"}
+            　留空並儲存 = 清除此分類自己的設定，改回繼承上層或不套用
+          </p>
+
+          {noticeLoading ? (
+            <div className="flex justify-center py-8"><span className="loading loading-spinner"></span></div>
+          ) : (
+            <div className="mt-4">
+              <RichTextEditor value={noticeContent} onChange={setNoticeContent} onUploadImage={uploadNoticeImage} />
+            </div>
+          )}
+
+          <div className="modal-action">
+            <button className="btn btn-sm" onClick={() => setNoticeCategoryId(null)}>{t("common.cancel")}</button>
+            <button className="btn btn-primary btn-sm gap-1" disabled={noticeSaving || noticeLoading} onClick={saveNotice}>
+              {noticeSaving && <span className="loading loading-spinner loading-xs"></span>}
+              <Save size={14} /> 儲存
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop">
+          <button onClick={() => setNoticeCategoryId(null)}>close</button>
+        </form>
+      </dialog>
     </div>
   );
 }

@@ -28,12 +28,13 @@ type RentalController struct {
 	categoryRepo    port.CategoryRepository
 	rentalRuleRepo  *postgres.CategoryRentalRuleRepo
 	dailyReportRepo *postgres.RentalDailyReportRepo
+	templateRepo    *postgres.ChecklistTemplateRepo
 }
 
-func NewRentalController(rentalRepo *postgres.RentalRepo, assetRepo *postgres.AssetRepo, userRepo port.UserRepository, notifySvc *service.NotifyService, auth *middleware.AuthHelper, categoryRepo port.CategoryRepository, rentalRuleRepo *postgres.CategoryRentalRuleRepo, dailyReportRepo *postgres.RentalDailyReportRepo) *RentalController {
+func NewRentalController(rentalRepo *postgres.RentalRepo, assetRepo *postgres.AssetRepo, userRepo port.UserRepository, notifySvc *service.NotifyService, auth *middleware.AuthHelper, categoryRepo port.CategoryRepository, rentalRuleRepo *postgres.CategoryRentalRuleRepo, dailyReportRepo *postgres.RentalDailyReportRepo, templateRepo *postgres.ChecklistTemplateRepo) *RentalController {
 	return &RentalController{
 		rentalRepo: rentalRepo, assetRepo: assetRepo, userRepo: userRepo, notifySvc: notifySvc, auth: auth,
-		categoryRepo: categoryRepo, rentalRuleRepo: rentalRuleRepo, dailyReportRepo: dailyReportRepo,
+		categoryRepo: categoryRepo, rentalRuleRepo: rentalRuleRepo, dailyReportRepo: dailyReportRepo, templateRepo: templateRepo,
 	}
 }
 
@@ -107,6 +108,47 @@ func dateOnly(t time.Time) time.Time {
 	return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
 }
 
+// formatChecklistValue renders one return_checklist answer for Excel export,
+// using item's resolved type (if known) to pick a sensible representation.
+// item may be the zero value when the key couldn't be resolved to any
+// template (e.g. stale data from a since-edited template) — in that case it
+// falls back to a generic string print.
+func formatChecklistValue(item domain.ChecklistItem, value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	switch item.Type {
+	case "boolean":
+		if b, ok := value.(bool); ok && b {
+			return "V"
+		}
+		return ""
+	case "number":
+		s := fmt.Sprintf("%v", value)
+		if item.Unit != "" {
+			s += " " + item.Unit
+		}
+		return s
+	case "location":
+		if m, ok := value.(map[string]interface{}); ok {
+			if addr, ok := m["address"].(string); ok && addr != "" {
+				return addr
+			}
+			if lat, ok := m["lat"]; ok {
+				return fmt.Sprintf("%v,%v", lat, m["lng"])
+			}
+		}
+		return fmt.Sprintf("%v", value)
+	case "photo":
+		if arr, ok := value.([]interface{}); ok {
+			return fmt.Sprintf("%d 張照片", len(arr))
+		}
+		return ""
+	default:
+		return fmt.Sprintf("%v", value)
+	}
+}
+
 // buildNotifyData gathers device names and common fields for notification emails.
 func (c *RentalController) buildNotifyData(ctx context.Context, rentalNumber int, borrowerName, approverName, purpose, notes string, expectedReturn *time.Time) service.RentalNotifyData {
 	data := service.RentalNotifyData{
@@ -172,26 +214,34 @@ func (c *RentalController) handlePickableAssets(w http.ResponseWriter, r *http.R
 		return
 	}
 	type row struct {
-		AssetID      string  `json:"asset_id"`
-		AssetNumber  string  `json:"asset_number"`
-		Name         string  `json:"name"`
-		Spec         string  `json:"spec"`
-		DeviceUdid   *string `json:"device_udid"`
-		SerialNumber string  `json:"serial_number"`
-		Model        string  `json:"model"`
-		OSVersion    string  `json:"os_version"`
-		AssetStatus  string  `json:"asset_status"`
-		CategoryID   *string `json:"category_id"`
-		CategoryName string  `json:"category_name"`
+		AssetID            string                 `json:"asset_id"`
+		AssetNumber        string                 `json:"asset_number"`
+		Name               string                 `json:"name"`
+		Spec               string                 `json:"spec"`
+		DeviceUdid         *string                `json:"device_udid"`
+		SerialNumber       string                 `json:"serial_number"`
+		Model              string                 `json:"model"`
+		OSVersion          string                 `json:"os_version"`
+		AssetStatus        string                 `json:"asset_status"`
+		CategoryID         *string                `json:"category_id"`
+		CategoryName       string                 `json:"category_name"`
+		LastReturnLocation map[string]interface{} `json:"last_return_location,omitempty"`
+		LastReturnAt       *string                `json:"last_return_at,omitempty"`
 	}
 	rows := make([]row, 0, len(items))
 	for _, it := range items {
-		rows = append(rows, row{
+		rr := row{
 			AssetID: it.AssetID, AssetNumber: it.AssetNumber, Name: it.Name, Spec: it.Spec,
 			DeviceUdid:   it.DeviceUdid,
 			SerialNumber: it.SerialNumber, Model: it.Model, OSVersion: it.OSVersion,
 			AssetStatus: it.AssetStatus, CategoryID: it.CategoryID, CategoryName: it.CategoryName,
-		})
+			LastReturnLocation: it.LastReturnLocation,
+		}
+		if it.LastReturnAt != nil {
+			s := it.LastReturnAt.Format(time.RFC3339)
+			rr.LastReturnAt = &s
+		}
+		rows = append(rows, rr)
 	}
 	writeJSON(w, map[string]interface{}{"assets": rows})
 }
@@ -246,7 +296,15 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 				"custodian_id": rl.CustodianID, "custodian_name": rl.CustodianName,
 				"rental_number": rl.RentalNumber, "is_archived": rl.IsArchived,
 				"return_checklist": rl.ReturnChecklist, "return_notes": rl.ReturnNotes,
-				"multi_day_reason": rl.MultiDayReason,
+				"multi_day_reason": rl.MultiDayReason, "category_id": rl.CategoryID,
+				"return_checklist_reported": rl.ReturnChecklistReported,
+				"return_reported_by":        rl.ReturnReportedBy,
+				"cross_day_reason":          rl.CrossDayReason,
+			}
+			if rl.ReturnReportedAt != nil {
+				row["return_reported_at"] = rl.ReturnReportedAt.Format(time.RFC3339)
+			} else {
+				row["return_reported_at"] = nil
 			}
 			if rl.CategoryID != nil {
 				dailyTracking, dErr := c.rentalRuleRepo.ResolveDailyTrackingRequired(r.Context(), categoriesCache, *rl.CategoryID)
@@ -472,14 +530,14 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 }
 
 // handleRentalByID godoc
-// @Summary 借用單操作：approve / activate / return / reject / delete
+// @Summary 借用單操作：approve / activate / submit-return / return / reject / delete
 // @Tags Rental
 // @Accept json
 // @Produce json
 // @Security BearerAuth
 // @Param id path string true "借用單 ID"
-// @Param action path string false "操作" Enums(approve,activate,return,reject)
-// @Param body body swagReturnReq false "歸還資訊（return 時使用）"
+// @Param action path string false "操作" Enums(approve,activate,submit-return,return,reject,daily-report)
+// @Param body body swagReturnReq false "歸還核對資訊（return 時使用，見 swagSubmitReturnReq 為 submit-return 時使用）"
 // @Success 200 {object} swagOK
 // @Failure 400 {object} swagError
 // @Failure 404 {object} swagError
@@ -558,24 +616,139 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 			log.Printf("[rental] batch activated: rental_number=%d borrower=%s", rental.RentalNumber, borrowerName)
 			writeJSON(w, map[string]interface{}{"ok": true, "status": "active"})
 
-		case "return":
+		case "submit-return":
 			if rental.Status != "active" {
 				writeError(w, http.StatusBadRequest, "rental is not active")
 				return
 			}
-			var returnBody struct {
+			// Stage 1: the borrower (or an admin on their behalf) reports the
+			// checklist while the devices are still in their hands.
+			borrowerID, borrowerName, err := c.rentalRepo.GetBorrowerInfo(r.Context(), rental.ID)
+			if err != nil {
+				writeError(w, http.StatusNotFound, "rental not found")
+				return
+			}
+			if claims.UserID != borrowerID && claims.Role != "admin" {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			var submitBody struct {
 				Notes     string                 `json:"notes"`
 				Checklist map[string]interface{} `json:"checklist"`
 			}
+			json.NewDecoder(r.Body).Decode(&submitBody)
+			var reportedJSON []byte
+			if submitBody.Checklist != nil {
+				reportedJSON, _ = json.Marshal(submitBody.Checklist)
+			}
+			if err := c.rentalRepo.SubmitReturnByNumber(r.Context(), rental.RentalNumber, reportedJSON, claims.UserID); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			// If this rental is under daily tracking, today's submit-return
+			// also counts as today's daily report — otherwise the day the
+			// devices actually come back would be the one day with no entry.
+			if required, _ := c.resolveDailyTrackingRequiredForRentalNumber(r.Context(), rental.RentalNumber); required {
+				today := dateOnly(time.Now())
+				if exists, _ := c.dailyReportRepo.ExistsForDate(r.Context(), rental.RentalNumber, today); !exists {
+					reportedBy := claims.UserID
+					c.dailyReportRepo.Create(r.Context(), &domain.RentalDailyReport{
+						RentalNumber: rental.RentalNumber, ReportDate: today,
+						Checklist: submitBody.Checklist, ReportedBy: &reportedBy,
+					})
+				}
+			}
+			// Notify custodian(s) there's a return pending their verification.
+			go func() {
+				bgCtx := context.Background()
+				data := c.buildNotifyData(bgCtx, rental.RentalNumber, borrowerName, "", "", submitBody.Notes, nil)
+				assetIDs, _ := c.rentalRepo.ListAssetIDsByNumber(bgCtx, rental.RentalNumber)
+				notified := map[string]bool{}
+				for _, aid := range assetIDs {
+					a, err := c.assetRepo.GetByID(bgCtx, aid)
+					if err != nil || a == nil || a.CustodianID == nil || *a.CustodianID == "" {
+						continue
+					}
+					custodian, err := c.userRepo.GetByID(bgCtx, *a.CustodianID)
+					if err == nil && custodian.Email != "" && !notified[custodian.Email] {
+						c.notifySvc.SendRentalPendingVerification(bgCtx, data, custodian.Email)
+						notified[custodian.Email] = true
+					}
+				}
+			}()
+			log.Printf("[rental] batch return reported: rental_number=%d reporter=%s", rental.RentalNumber, claims.Username)
+			writeJSON(w, map[string]interface{}{"ok": true, "status": "pending_return"})
+
+		case "return":
+			if rental.Status != "pending_return" {
+				writeError(w, http.StatusBadRequest, "rental is not pending return")
+				return
+			}
+			var returnBody struct {
+				Notes          string                 `json:"notes"`
+				Checklist      map[string]interface{} `json:"checklist"`
+				CrossDayReason string                 `json:"cross_day_reason"`
+			}
 			json.NewDecoder(r.Body).Decode(&returnBody)
+
+			// 逐日追蹤分類：實際歸還（今天）晚於預計歸還日期時，不硬擋，但強制
+			// 要求填寫逾期原因，供事後查閱。
+			if required, _ := c.resolveDailyTrackingRequiredForRentalNumber(r.Context(), rental.RentalNumber); required {
+				if rental.ExpectedReturn != nil && dateOnly(time.Now()).After(dateOnly(*rental.ExpectedReturn)) && strings.TrimSpace(returnBody.CrossDayReason) == "" {
+					writeError(w, http.StatusBadRequest, "已超過預計歸還日期，需填寫逾期原因")
+					return
+				}
+			}
+
 			var checklistJSON []byte
 			if returnBody.Checklist != nil {
 				checklistJSON, _ = json.Marshal(returnBody.Checklist)
 			}
-			c.rentalRepo.ReturnByNumber(r.Context(), rental.RentalNumber, checklistJSON, returnBody.Notes)
+			c.rentalRepo.ReturnByNumber(r.Context(), rental.RentalNumber, checklistJSON, returnBody.Notes, claims.UserID, strings.TrimSpace(returnBody.CrossDayReason))
 			assetIDs, _ := c.rentalRepo.ListAssetIDsByNumber(r.Context(), rental.RentalNumber)
 			for _, aid := range assetIDs {
 				c.assetRepo.ClearHolderByID(r.Context(), aid)
+			}
+			// Phase 2c: if the verified checklist answered a "location" type
+			// item, record it on every asset in this batch as their last
+			// known return location (AssetPicker surfaces it for the next
+			// person choosing this asset). Resolved from the categories
+			// actually involved, not guessed from key names.
+			if returnBody.Checklist != nil {
+				categoryIDs := make([]*string, 0, len(assetIDs))
+				for _, aid := range assetIDs {
+					a, err := c.assetRepo.GetByID(r.Context(), aid)
+					if err == nil && a != nil {
+						categoryIDs = append(categoryIDs, a.CategoryID)
+					}
+				}
+				if cats, err := c.categoryRepo.List(r.Context()); err == nil {
+					var catIDStrs []string
+					for _, cid := range categoryIDs {
+						if cid != nil && *cid != "" {
+							catIDStrs = append(catIDStrs, *cid)
+						}
+					}
+					if items, err := c.templateRepo.ResolveMerged(r.Context(), cats, catIDStrs); err == nil {
+						for _, it := range items {
+							if it.Type != "location" {
+								continue
+							}
+							v, ok := returnBody.Checklist[it.Key]
+							if !ok || v == nil {
+								continue
+							}
+							locJSON, err := json.Marshal(v)
+							if err != nil {
+								continue
+							}
+							for _, aid := range assetIDs {
+								c.assetRepo.UpdateLastReturnLocation(r.Context(), aid, locJSON)
+							}
+							break
+						}
+					}
+				}
 			}
 			// Notify custodian that devices are returned
 			go func() {
@@ -837,12 +1010,44 @@ func (c *RentalController) handleExport(w http.ResponseWriter, r *http.Request) 
 		"pending": "待核准", "approved": "已核准", "active": "借出中",
 		"returned": "已歸還", "rejected": "已拒絕",
 	}
-	checklistLabels := [][2]string{
-		{"deviceReceived", "已收到裝置"},
-		{"screenOk", "螢幕正常"},
-		{"bodyOk", "機身正常"},
-		{"canPowerOn", "可開機"},
-		{"accessoriesOk", "配件齊全"},
+
+	// Dynamic checklist columns (Phase 2a): scan the keys that actually
+	// appear in this export's return_checklist data, in first-seen order,
+	// rather than a hardcoded 5-column list. Also try to resolve each key's
+	// real label/type from the checklist templates of categories represented
+	// in this export, falling back to the bare key when a key isn't found in
+	// any of them (e.g. old data from a since-edited template).
+	var checklistKeys []string
+	seenKeys := map[string]bool{}
+	for _, g := range groups {
+		for k := range g.First.ReturnChecklist {
+			if !seenKeys[k] {
+				seenKeys[k] = true
+				checklistKeys = append(checklistKeys, k)
+			}
+		}
+	}
+	itemMeta := map[string]domain.ChecklistItem{}
+	if len(checklistKeys) > 0 {
+		catsCache, _ := c.categoryRepo.List(r.Context())
+		seenCategories := map[string]bool{}
+		for _, g := range groups {
+			for _, rl := range g.Rentals {
+				if rl.CategoryID == nil || seenCategories[*rl.CategoryID] {
+					continue
+				}
+				seenCategories[*rl.CategoryID] = true
+				items, err := c.templateRepo.ResolveForCategory(r.Context(), catsCache, *rl.CategoryID)
+				if err != nil {
+					continue
+				}
+				for _, it := range items {
+					if _, ok := itemMeta[it.Key]; !ok {
+						itemMeta[it.Key] = it
+					}
+				}
+			}
+		}
 	}
 
 	f := excelize.NewFile()
@@ -854,8 +1059,12 @@ func (c *RentalController) handleExport(w http.ResponseWriter, r *http.Request) 
 		"單號", "裝置數", "裝置名稱", "裝置序號", "借用人", "保管人",
 		"用途", "狀態", "借出日期", "預計歸還", "實際歸還", "核准人", "備註",
 	}
-	for _, cl := range checklistLabels {
-		headers = append(headers, "歸還清點-"+cl[1])
+	for _, k := range checklistKeys {
+		label := k
+		if it, ok := itemMeta[k]; ok && it.Label != "" {
+			label = it.Label
+		}
+		headers = append(headers, "歸還清點-"+label)
 	}
 	headers = append(headers, "歸還備註", "存查")
 
@@ -919,18 +1128,13 @@ func (c *RentalController) handleExport(w http.ResponseWriter, r *http.Request) 
 			rl.Notes,
 		}
 
-		// Checklist columns
+		// Checklist columns — rendered per the item's resolved type where
+		// known (boolean → "V" when true, number appends its unit, location
+		// prints an address or "lat,lng", photo prints an item count),
+		// falling back to a plain string print for anything else/unresolved.
 		cl := rl.ReturnChecklist
-		for _, pair := range checklistLabels {
-			v := ""
-			if cl != nil {
-				if b, ok := cl[pair[0]]; ok {
-					if bv, ok := b.(bool); ok && bv {
-						v = "V"
-					}
-				}
-			}
-			vals = append(vals, v)
+		for _, k := range checklistKeys {
+			vals = append(vals, formatChecklistValue(itemMeta[k], cl[k]))
 		}
 
 		// Return notes + archived

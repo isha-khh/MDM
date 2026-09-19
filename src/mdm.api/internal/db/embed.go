@@ -85,3 +85,18 @@ var Migration027SQL string
 
 //go:embed migrations/028_category_rental_rules.up.sql
 var Migration028SQL string
+
+//go:embed migrations/029_checklist_templates.up.sql
+var Migration029SQL string
+
+//go:embed migrations/030_rental_two_stage_return.up.sql
+var Migration030SQL string
+
+//go:embed migrations/031_asset_last_return_location.up.sql
+var Migration031SQL string
+
+//go:embed migrations/032_category_notices.up.sql
+var Migration032SQL string
+
+//go:embed migrations/033_category_notice_images.up.sql
+var Migration033SQL string

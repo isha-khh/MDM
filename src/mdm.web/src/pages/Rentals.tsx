@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { AssetPicker } from "../components/AssetPicker";
 import { CategoryLeafSelect } from "../components/CategoryLeafSelect";
 import apiClient from "../lib/apiClient";
+import DOMPurify from "dompurify";
 import { useDialog } from "../components/DialogProvider";
 import {
   Check, X, RotateCcw, Play, UserPlus, Clock,
@@ -11,70 +12,9 @@ import {
 } from "lucide-react";
 import type { ColDef, ICellRendererParams } from "ag-grid-enterprise";
 import { DataGrid } from "../components/DataGrid";
-
-interface ReturnChecklist {
-  deviceReceived?: boolean;
-  screenOk?: boolean;
-  bodyOk?: boolean;
-  canPowerOn?: boolean;
-  accessoriesOk?: boolean;
-}
-
-interface Rental {
-  id: string;
-  asset_id: string | null;
-  device_udid: string | null;
-  asset_number: string;
-  asset_name: string;
-  borrower_id: string;
-  borrower_name: string;
-  approver_id?: string;
-  approver_name: string;
-  custodian_id?: string;
-  custodian_name: string;
-  status: string;
-  purpose: string;
-  borrow_date: string;
-  expected_return?: string;
-  actual_return?: string;
-  notes: string;
-  device_name: string;
-  device_serial: string;
-  rental_number: number;
-  is_archived: boolean;
-  return_checklist?: ReturnChecklist;
-  return_notes?: string;
-  multi_day_reason?: string;
-  daily_tracking_required?: boolean;
-}
-
-interface RentalGroup {
-  rental_number: number;
-  rentals: Rental[];
-  borrower_id: string;
-  borrower_name: string;
-  purpose: string;
-  status: string;
-  borrow_date: string;
-  expected_return?: string;
-  actual_return?: string;
-  approver_name: string;
-  is_archived: boolean;
-  custodian_name: string;
-  custodian_id?: string;
-  return_checklist?: ReturnChecklist;
-  return_notes?: string;
-  multi_day_reason?: string;
-  daily_tracking_required?: boolean;
-}
-
-interface DailyReport {
-  id: string;
-  report_date: string;
-  checklist: Record<string, unknown>;
-  backfill_reason: string;
-  reported_at: string;
-}
+import { type ChecklistItem, type ChecklistAnswers, isChecklistItemFilled } from "../lib/checklist";
+import { ChecklistFields } from "../components/ChecklistFields";
+import { type Rental, type RentalGroup, type DailyReport, groupByRentalNumber } from "../lib/rentalTypes";
 
 interface UserOption {
   id: string;
@@ -83,48 +23,13 @@ interface UserOption {
 }
 
 const statusConfig: Record<string, { label: string; badge: string; icon: React.ReactNode }> = {
-  pending:  { label: "待核准", badge: "badge-warning",  icon: <Clock size={14} /> },
-  approved: { label: "已核准", badge: "badge-info",     icon: <Check size={14} /> },
-  active:   { label: "借出中", badge: "badge-success",  icon: <Play size={14} /> },
-  returned: { label: "已歸還", badge: "badge-ghost",    icon: <RotateCcw size={14} /> },
-  rejected: { label: "已拒絕", badge: "badge-error",    icon: <X size={14} /> },
+  pending:        { label: "待核准", badge: "badge-warning", icon: <Clock size={14} /> },
+  approved:       { label: "已核准", badge: "badge-info",    icon: <Check size={14} /> },
+  active:         { label: "借出中", badge: "badge-success", icon: <Play size={14} /> },
+  pending_return: { label: "待核對", badge: "badge-info",    icon: <Clock size={14} /> },
+  returned:       { label: "已歸還", badge: "badge-ghost",   icon: <RotateCcw size={14} /> },
+  rejected:       { label: "已拒絕", badge: "badge-error",   icon: <X size={14} /> },
 };
-
-function groupByRentalNumber(rentals: Rental[]): RentalGroup[] {
-  const map = new Map<number, Rental[]>();
-  for (const r of rentals) {
-    const list = map.get(r.rental_number) || [];
-    list.push(r);
-    map.set(r.rental_number, list);
-  }
-  const groups: RentalGroup[] = [];
-  for (const [num, items] of map) {
-    const first = items[0];
-    groups.push({
-      rental_number: num,
-      rentals: items,
-      borrower_id: first.borrower_id,
-      borrower_name: first.borrower_name,
-      purpose: first.purpose,
-      status: first.status,
-      borrow_date: first.borrow_date,
-      expected_return: first.expected_return,
-      actual_return: first.actual_return,
-      approver_name: first.approver_name,
-      is_archived: first.is_archived,
-      custodian_name: first.custodian_name,
-      custodian_id: first.custodian_id,
-      return_checklist: first.return_checklist,
-      return_notes: first.return_notes,
-      multi_day_reason: first.multi_day_reason,
-      // Union across the batch, matching the backend's own union policy for
-      // "does this batch touch any daily-tracking category".
-      daily_tracking_required: items.some((it) => it.daily_tracking_required),
-    });
-  }
-  groups.sort((a, b) => b.rental_number - a.rental_number);
-  return groups;
-}
 
 async function downloadExportExcel(ids?: string[]) {
   const params = new URLSearchParams();
@@ -144,6 +49,20 @@ async function downloadExportExcel(ids?: string[]) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+// Desktop always has network, so a checklist photo just uploads immediately
+// and the real id is stored — no local-blob staging needed (that's the
+// mobile self-service pages' offline-queue concern, see src/lib/offlineQueue.ts).
+async function uploadChecklistPhoto(file: File, item: ChecklistItem, rentalNumber: number): Promise<string> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  form.append("rental_number", String(rentalNumber));
+  form.append("item_key", item.key);
+  const { data } = await apiClient.post("/api/checklist-photos", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data.id;
 }
 
 export function Rentals() {
@@ -218,12 +137,15 @@ export function Rentals() {
     setCatLines([{ categoryId: "", quantity: 1 }]);
   };
 
-  // Multi-day rentals (borrow_date ≠ expected_return) may require a reason —
-  // enforced server-side only for "逐日追蹤" categories (e.g. vehicles), but
-  // shown proactively here so the user isn't surprised by a rejected submit.
+  // Multi-day rentals (borrow_date ≠ expected_return) only need a reason when
+  // they touch a "逐日追蹤" category (e.g. vehicles) — enforced server-side,
+  // and resolved here (含繼承, via /api/category-rental-rules/resolve) so the
+  // field only appears when it'll actually be required, instead of on every
+  // multi-day booking regardless of category.
   const isMultiDay = !!expectedReturn && expectedReturn !== borrowDate;
+  const [dailyTrackingHit, setDailyTrackingHit] = useState(false);
 
-  const handleCreate = async () => {
+  const submitCreate = async () => {
     setCreating(true);
     try {
       const common = {
@@ -254,28 +176,145 @@ export function Rentals() {
     } finally { setCreating(false); }
   };
 
-  // Return dialog state
-  const [returnRentalId, setReturnRentalId] = useState<string | null>(null);
-  const [checklist, setChecklist] = useState({
-    deviceReceived: false,
-    screenOk: false,
-    bodyOk: false,
-    canPowerOn: false,
-    accessoriesOk: false,
-  });
+  // 分類注意事項（Phase 3）——送出申請前先解析這批資產涉及的分類是否有尚未
+  // 同意過的注意事項，有的話攔截提交、跳出彙整 dialog，全部勾選同意後才真的
+  // 呼叫 submitCreate() 並記錄同意紀錄。
+  const [noticePending, setNoticePending] = useState<{ category_id: string; content: string }[]>([]);
+  const [noticeAgreed, setNoticeAgreed] = useState<Record<string, boolean>>({});
+  const [noticeChecking, setNoticeChecking] = useState(false);
+  const [noticeSubmitting, setNoticeSubmitting] = useState(false);
+
+  const resolveCreateCategoryIds = async (): Promise<string[]> => {
+    if (createTab === "category") {
+      return Array.from(new Set(catLines.map((l) => l.categoryId).filter((v): v is string => !!v)));
+    }
+    try {
+      const { data } = await apiClient.get("/api/rental-pickable-assets");
+      const byId = new Map<string, string | null>(
+        (data.assets || []).map((a: { asset_id: string; category_id: string | null }) => [a.asset_id, a.category_id]),
+      );
+      return Array.from(new Set(selectedAssets.map((id) => byId.get(id)).filter((v): v is string => !!v)));
+    } catch { return []; }
+  };
+
+  useEffect(() => {
+    if (!isMultiDay) { setDailyTrackingHit(false); return; }
+    let cancelled = false;
+    (async () => {
+      const categoryIds = await resolveCreateCategoryIds();
+      if (categoryIds.length === 0) { if (!cancelled) setDailyTrackingHit(false); return; }
+      try {
+        const { data } = await apiClient.get("/api/category-rental-rules/resolve", {
+          params: { category_ids: categoryIds.join(",") },
+        });
+        if (!cancelled) setDailyTrackingHit(!!data.daily_tracking_required);
+      } catch { if (!cancelled) setDailyTrackingHit(false); }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMultiDay, createTab, selectedAssets, catLines]);
+
+  const handleCreateClick = async () => {
+    setNoticeChecking(true);
+    try {
+      const categoryIds = await resolveCreateCategoryIds();
+      if (categoryIds.length === 0) { await submitCreate(); return; }
+      const { data } = await apiClient.get("/api/category-notices/resolve", {
+        params: { category_ids: categoryIds.join(",") },
+      });
+      const pending: { category_id: string; content: string }[] = data.pending || [];
+      if (pending.length === 0) {
+        await submitCreate();
+      } else {
+        setNoticePending(pending);
+        setNoticeAgreed({});
+      }
+    } catch {
+      await submitCreate();
+    } finally { setNoticeChecking(false); }
+  };
+
+  const allNoticesAgreed = noticePending.every((n) => noticeAgreed[n.category_id]);
+
+  const confirmNoticesAndCreate = async () => {
+    setNoticeSubmitting(true);
+    try {
+      await apiClient.post("/api/category-notice-acks", { category_ids: noticePending.map((n) => n.category_id) });
+      setNoticePending([]);
+      await submitCreate();
+    } catch (err: unknown) {
+      const resp = (err as { response?: { data?: { error?: string } } })?.response?.data;
+      await dialog.error(resp?.error || "同意紀錄寫入失敗");
+    } finally { setNoticeSubmitting(false); }
+  };
+
+  // Return dialog state — checklist items are resolved dynamically per the
+  // batch's asset categories (Phase 2a). Phase 2b splits the actual submit
+  // into two stages sharing this one dialog shell: "submit" is the borrower
+  // (or admin) reporting while the devices are still with them, "verify" is
+  // the custodian (or admin) confirming/correcting that report before the
+  // devices are marked returned.
+  const [returnGroup, setReturnGroup] = useState<RentalGroup | null>(null);
+  const [returnStage, setReturnStage] = useState<"submit" | "verify">("submit");
+  const [returnItems, setReturnItems] = useState<ChecklistItem[]>([]);
+  const [returnItemsLoading, setReturnItemsLoading] = useState(false);
+  const [returnValues, setReturnValues] = useState<ChecklistAnswers>({});
   const [returnNotes, setReturnNotes] = useState("");
+  const [crossDayReason, setCrossDayReason] = useState("");
 
-  const allChecked = Object.values(checklist).every(Boolean);
+  const allRequiredFilled = returnItems.every((item) => isChecklistItemFilled(item, returnValues[item.key]));
+  // Only relevant at the verify stage: a daily-tracking rental that's being
+  // verified after its expected_return date needs an overrun explanation —
+  // mirrors the backend's own check, just surfaced before submit instead of
+  // rejected after.
+  const isOverdueVerify = returnStage === "verify" && !!returnGroup?.daily_tracking_required
+    && !!returnGroup?.expected_return && todayStr() > returnGroup.expected_return;
 
-  // Daily report dialog (逐日追蹤分類：每日回報，跟歸還是分開的動作)
+  // Read-only history shown alongside the verify-stage dialog for
+  // daily-tracking rentals, so the custodian can sanity-check the reported
+  // checklist against each day's individual entry before confirming.
+  const [verifyDailyReports, setVerifyDailyReports] = useState<DailyReport[]>([]);
+
+  const openReturnDialog = async (group: RentalGroup, stage: "submit" | "verify") => {
+    setReturnGroup(group);
+    setReturnStage(stage);
+    setReturnValues(stage === "verify" ? (group.return_checklist_reported || {}) : {});
+    setReturnNotes("");
+    setCrossDayReason("");
+    setVerifyDailyReports([]);
+    setReturnItemsLoading(true);
+    try {
+      const categoryIds = Array.from(new Set(group.rentals.map((rl) => rl.category_id).filter((v): v is string => !!v)));
+      const { data } = await apiClient.get("/api/checklist-templates/resolve", {
+        params: { category_ids: categoryIds.join(",") },
+      });
+      setReturnItems(data.items || []);
+    } catch {
+      setReturnItems([]);
+    } finally { setReturnItemsLoading(false); }
+
+    if (stage === "verify" && group.daily_tracking_required) {
+      try {
+        const { data } = await apiClient.get(`/api/rentals/${group.rentals[0].id}/daily-reports`);
+        setVerifyDailyReports(data.reports || []);
+      } catch { /* best-effort, not required to complete verification */ }
+    }
+  };
+
+  // Daily report dialog (逐日追蹤分類：每日回報，跟歸還是分開的動作)。項目
+  // 跟歸還清點共用同一套分類範本解析（Phase 2a 之前這裡曾經寫死一個「里程數」
+  // 欄位，現在改成跟歸還一樣依分類動態渲染）。
   const [dailyReportGroup, setDailyReportGroup] = useState<RentalGroup | null>(null);
   const [dailyReportDate, setDailyReportDate] = useState("");
-  const [dailyReportMileage, setDailyReportMileage] = useState("");
+  const [dailyReportItems, setDailyReportItems] = useState<ChecklistItem[]>([]);
+  const [dailyReportItemsLoading, setDailyReportItemsLoading] = useState(false);
+  const [dailyReportValues, setDailyReportValues] = useState<ChecklistAnswers>({});
   const [dailyReportBackfillReason, setDailyReportBackfillReason] = useState("");
   const [dailyReportExistingDates, setDailyReportExistingDates] = useState<string[]>([]);
   const [dailyReportSubmitting, setDailyReportSubmitting] = useState(false);
 
   const isDailyReportBackfill = dailyReportDate !== "" && dailyReportDate !== todayStr();
+  const dailyReportRequiredFilled = dailyReportItems.every((item) => isChecklistItemFilled(item, dailyReportValues[item.key]));
 
   const openDailyReport = async (group: RentalGroup) => {
     const rentalId = group.rentals[0].id;
@@ -286,24 +325,45 @@ export function Rentals() {
     } catch { /* best-effort — an empty list just means no prior reports fetched */ }
     setDailyReportExistingDates(existingDates);
     setDailyReportGroup(group);
-    setDailyReportMileage("");
+    setDailyReportValues({});
     setDailyReportBackfillReason("");
     // Default to today unless it's already covered, in which case default to
     // blank so the user has to deliberately pick a missed day to backfill.
     setDailyReportDate(existingDates.includes(todayStr()) ? "" : todayStr());
+
+    setDailyReportItemsLoading(true);
+    try {
+      const categoryIds = Array.from(new Set(group.rentals.map((rl) => rl.category_id).filter((v): v is string => !!v)));
+      const { data } = await apiClient.get("/api/checklist-templates/resolve", {
+        params: { category_ids: categoryIds.join(",") },
+      });
+      setDailyReportItems(data.items || []);
+    } catch {
+      setDailyReportItems([]);
+    } finally { setDailyReportItemsLoading(false); }
+  };
+
+  // Closes the dialog AND clears dailyReportItems together — leaving stale
+  // (non-empty) items around while dailyReportGroup is null would make the
+  // dialog's still-mounted (just CSS-hidden) content try to render
+  // ChecklistFields with rentalNumber={dailyReportGroup!.rental_number},
+  // crashing on the null dereference.
+  const closeDailyReportDialog = () => {
+    setDailyReportGroup(null);
+    setDailyReportItems([]);
   };
 
   const confirmDailyReport = async () => {
     if (!dailyReportGroup || !dailyReportDate) return;
     setDailyReportSubmitting(true);
     try {
-      const body: Record<string, unknown> = { checklist: { mileage: dailyReportMileage ? Number(dailyReportMileage) : null } };
+      const body: Record<string, unknown> = { checklist: dailyReportValues };
       if (isDailyReportBackfill) {
         body.report_date = dailyReportDate;
         body.backfill_reason = dailyReportBackfillReason;
       }
       await apiClient.post(`/api/rentals/${dailyReportGroup.rentals[0].id}/daily-report`, body);
-      setDailyReportGroup(null);
+      closeDailyReportDialog();
       loadRentals();
     } catch (err: unknown) {
       const resp = (err as { response?: { data?: { error?: string } } })?.response?.data;
@@ -312,12 +372,6 @@ export function Rentals() {
   };
 
   const doAction = async (rentalId: string, action: string) => {
-    if (action === "return") {
-      setReturnRentalId(rentalId);
-      setChecklist({ deviceReceived: false, screenOk: false, bodyOk: false, canPowerOn: false, accessoriesOk: false });
-      setReturnNotes("");
-      return;
-    }
     const labels: Record<string, string> = {
       approve: "核准此租借申請（整批）？",
       activate: "確認借出裝置（整批）？",
@@ -332,17 +386,35 @@ export function Rentals() {
     }
   };
 
+  // Same reasoning as closeDailyReportDialog — clear returnItems together
+  // with returnGroup so the still-mounted (CSS-hidden) dialog never renders
+  // ChecklistFields with rentalNumber={returnGroup!.rental_number} while
+  // returnGroup is null.
+  const closeReturnDialog = () => {
+    setReturnGroup(null);
+    setReturnItems([]);
+  };
+
   const confirmReturn = async () => {
-    if (!returnRentalId) return;
+    if (!returnGroup) return;
     try {
-      await apiClient.post(`/api/rentals/${returnRentalId}/return`, {
-        notes: returnNotes,
-        checklist,
-      });
-      setReturnRentalId(null);
+      if (returnStage === "submit") {
+        await apiClient.post(`/api/rentals/${returnGroup.rentals[0].id}/submit-return`, {
+          notes: returnNotes,
+          checklist: returnValues,
+        });
+      } else {
+        await apiClient.post(`/api/rentals/${returnGroup.rentals[0].id}/return`, {
+          notes: returnNotes,
+          checklist: returnValues,
+          cross_day_reason: crossDayReason,
+        });
+      }
+      closeReturnDialog();
       loadRentals();
-    } catch (err) {
-      await dialog.error("歸還失敗: " + (err instanceof Error ? err.message : ""));
+    } catch (err: unknown) {
+      const resp = (err as { response?: { data?: { error?: string } } })?.response?.data;
+      await dialog.error(resp?.error || "歸還失敗: " + (err instanceof Error ? err.message : ""));
     }
   };
 
@@ -509,8 +581,11 @@ export function Rentals() {
             {g.status === "approved" && isAdmin && (
               <button onClick={() => doAction(firstRentalId, "activate")} className="btn btn-primary btn-xs gap-1"><Play size={12} /> 借出</button>
             )}
-            {g.status === "active" && canApprove(g) && (
-              <button onClick={() => doAction(firstRentalId, "return")} className="btn btn-warning btn-xs gap-1"><RotateCcw size={12} /> 歸還</button>
+            {g.status === "active" && (isAdmin || g.borrower_id === user?.id) && (
+              <button onClick={() => openReturnDialog(g, "submit")} className="btn btn-warning btn-xs gap-1"><RotateCcw size={12} /> 我要歸還</button>
+            )}
+            {g.status === "pending_return" && canApprove(g) && (
+              <button onClick={() => openReturnDialog(g, "verify")} className="btn btn-info btn-xs gap-1"><CheckCircle size={12} /> 核對歸還</button>
             )}
             {g.status === "active" && g.daily_tracking_required && (isAdmin || g.borrower_id === user?.id) && (
               <button onClick={() => openDailyReport(g)} className="btn btn-outline btn-xs gap-1"><Gauge size={12} /> 每日回報</button>
@@ -576,6 +651,7 @@ export function Rentals() {
             <option value="pending">待核准</option>
             <option value="approved">已核准</option>
             <option value="active">借出中</option>
+            <option value="pending_return">待核對</option>
             <option value="returned">已歸還</option>
             <option value="rejected">已拒絕</option>
           </select>
@@ -701,11 +777,11 @@ export function Rentals() {
                   <label className="label"><span className="label-text font-medium">備註</span></label>
                   <input type="text" value={notes} onChange={(e) => setNotes(e.target.value)} className="input input-bordered input-sm" placeholder="其他備註" />
                 </div>
-                {isMultiDay && (
+                {isMultiDay && dailyTrackingHit && (
                   <div className="form-control sm:col-span-2">
                     <label className="label">
                       <span className="label-text font-medium">跨日說明</span>
-                      <span className="label-text-alt opacity-60">車輛等逐日追蹤分類的跨日租借必填，其他分類可留空</span>
+                      <span className="label-text-alt opacity-60">此分類為逐日追蹤，跨日租借需說明原因</span>
                     </label>
                     <input
                       type="text"
@@ -719,11 +795,11 @@ export function Rentals() {
               </div>
               <div className="flex gap-2">
                 <button
-                  onClick={handleCreate}
-                  disabled={creating || !borrowerId || (createTab === "asset" ? selectedAssets.length === 0 : catLines.filter((l) => l.categoryId && l.quantity >= 1).length === 0)}
+                  onClick={handleCreateClick}
+                  disabled={creating || noticeChecking || !borrowerId || (createTab === "asset" ? selectedAssets.length === 0 : catLines.filter((l) => l.categoryId && l.quantity >= 1).length === 0)}
                   className="btn btn-success btn-sm gap-1"
                 >
-                  {creating && <span className="loading loading-spinner loading-xs"></span>}
+                  {(creating || noticeChecking) && <span className="loading loading-spinner loading-xs"></span>}
                   提交申請
                 </button>
                 <button onClick={() => { setShowCreate(false); resetCreateForm(); }} className="btn btn-ghost btn-sm">{t("common.cancel")}</button>
@@ -741,6 +817,9 @@ export function Rentals() {
         <span className="badge badge-info badge-xs">已核准</span>
         <ArrowRight size={12} />
         <span className="badge badge-success badge-xs">借出中</span>
+        <ArrowRight size={12} />
+        <span className="badge badge-info badge-xs">待核對</span>
+        <span className="text-base-content/30">借用人回報，保管人核對</span>
         <ArrowRight size={12} />
         <span className="badge badge-ghost badge-xs">已歸還</span>
       </div>
@@ -781,31 +860,50 @@ export function Rentals() {
           getRowClass={(p) => p.data?.is_archived ? "opacity-50" : ""}
         />
       </div>
-      {/* Return checklist dialog */}
-      <dialog className={`modal ${returnRentalId ? "modal-open" : ""}`}>
+      {/* Return checklist dialog — items resolved dynamically per分類 (Phase 2a) */}
+      <dialog className={`modal ${returnGroup ? "modal-open" : ""}`}>
         <div className="modal-box">
-          <h3 className="font-bold text-lg">裝置歸還清點</h3>
-          <p className="text-sm text-base-content/60 mt-1">請確認以下項目後完成歸還（整批裝置）</p>
+          <h3 className="font-bold text-lg">{returnStage === "submit" ? "歸還回報" : "歸還核對"}</h3>
+          <p className="text-sm text-base-content/60 mt-1">
+            {returnStage === "submit"
+              ? "請在裝置還在您手上時填寫以下項目（整批裝置），送出後由保管人核對"
+              : "請核對借用人回報的內容（可修正）後完成歸還（整批裝置）"}
+          </p>
 
-          <div className="space-y-3 mt-4">
-            {[
-              { key: "deviceReceived" as const, label: "已收到裝置" },
-              { key: "screenOk" as const, label: "螢幕完好（無刮傷、裂痕）" },
-              { key: "bodyOk" as const, label: "機身完好（無凹損、變形）" },
-              { key: "canPowerOn" as const, label: "可正常開機使用" },
-              { key: "accessoriesOk" as const, label: "配件齊全（充電線、保護套等）" },
-            ].map((item) => (
-              <label key={item.key} className="flex items-center gap-3 cursor-pointer p-2 rounded hover:bg-base-200">
-                <input
-                  type="checkbox"
-                  className="checkbox checkbox-sm checkbox-success"
-                  checked={checklist[item.key]}
-                  onChange={(e) => setChecklist({ ...checklist, [item.key]: e.target.checked })}
-                />
-                <span className="text-sm">{item.label}</span>
-              </label>
-            ))}
-          </div>
+          {returnStage === "verify" && returnGroup?.daily_tracking_required && verifyDailyReports.length > 0 && (
+            <div className="mt-4 border border-base-300 rounded p-2">
+              <p className="text-xs font-medium opacity-70 mb-1">每日回報紀錄</p>
+              <div className="space-y-1">
+                {verifyDailyReports.map((rep) => (
+                  <div key={rep.id} className="flex items-center gap-2 text-xs">
+                    <span className="font-mono">{rep.report_date}</span>
+                    {rep.backfill_reason ? (
+                      <span className="badge badge-warning badge-xs" title={rep.backfill_reason}>補登</span>
+                    ) : (
+                      <span className="badge badge-ghost badge-xs">即時</span>
+                    )}
+                    <span className="opacity-70">{JSON.stringify(rep.checklist)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {returnItemsLoading ? (
+            <div className="flex justify-center py-8"><span className="loading loading-spinner"></span></div>
+          ) : returnItems.length === 0 ? (
+            <p className="text-sm text-base-content/50 py-4 text-center">此分類沒有設定歸還清點項目</p>
+          ) : (
+            <div className="mt-4">
+              <ChecklistFields
+                items={returnItems}
+                values={returnValues}
+                onChange={(key, v) => setReturnValues((prev) => ({ ...prev, [key]: v }))}
+                rentalNumber={returnGroup!.rental_number}
+                onUploadPhoto={uploadChecklistPhoto}
+              />
+            </div>
+          )}
 
           <div className="form-control mt-4">
             <label className="label"><span className="label-text text-sm">備註（選填）</span></label>
@@ -818,21 +916,41 @@ export function Rentals() {
             />
           </div>
 
-          {!allChecked && (
+          {isOverdueVerify && (
+            <div className="form-control mt-3">
+              <label className="label">
+                <span className="label-text text-sm">逾期原因（必填）</span>
+                <span className="label-text-alt opacity-60">已超過預計歸還日期 {returnGroup?.expected_return}</span>
+              </label>
+              <textarea
+                value={crossDayReason}
+                onChange={(e) => setCrossDayReason(e.target.value)}
+                placeholder="例如：交通延誤，隔天才歸還"
+                className="textarea textarea-bordered textarea-sm"
+                rows={2}
+              />
+            </div>
+          )}
+
+          {!allRequiredFilled && (
             <div role="alert" className="alert alert-warning mt-4 py-2">
-              <span className="text-sm">請完成所有清點項目</span>
+              <span className="text-sm">請完成所有必填清點項目</span>
             </div>
           )}
 
           <div className="modal-action">
-            <button className="btn btn-sm" onClick={() => setReturnRentalId(null)}>取消</button>
-            <button className="btn btn-warning btn-sm gap-1" disabled={!allChecked} onClick={confirmReturn}>
-              <RotateCcw size={14} /> 確認歸還
+            <button className="btn btn-sm" onClick={closeReturnDialog}>取消</button>
+            <button
+              className="btn btn-warning btn-sm gap-1"
+              disabled={!allRequiredFilled || (isOverdueVerify && !crossDayReason.trim())}
+              onClick={confirmReturn}
+            >
+              <RotateCcw size={14} /> {returnStage === "submit" ? "送出回報" : "確認歸還"}
             </button>
           </div>
         </div>
         <form method="dialog" className="modal-backdrop">
-          <button onClick={() => setReturnRentalId(null)}>close</button>
+          <button onClick={closeReturnDialog}>close</button>
         </form>
       </dialog>
 
@@ -841,7 +959,7 @@ export function Rentals() {
         <div className="modal-box">
           <h3 className="font-bold text-lg">每日回報</h3>
           <p className="text-sm text-base-content/60 mt-1">
-            單號 {dailyReportGroup?.rental_number}，記錄今天（或補登遺漏的一天）的里程
+            單號 {dailyReportGroup?.rental_number}，記錄今天（或補登遺漏的一天）的檢查項目
           </p>
 
           <div className="form-control mt-4">
@@ -869,15 +987,20 @@ export function Rentals() {
             </select>
           </div>
 
-          <div className="form-control mt-3">
-            <label className="label"><span className="label-text text-sm">里程數（km）</span></label>
-            <input
-              type="number"
-              value={dailyReportMileage}
-              onChange={(e) => setDailyReportMileage(e.target.value)}
-              className="input input-bordered input-sm"
-              placeholder="例如：12345"
-            />
+          <div className="mt-3">
+            {dailyReportItemsLoading ? (
+              <div className="flex justify-center py-8"><span className="loading loading-spinner"></span></div>
+            ) : dailyReportItems.length === 0 ? (
+              <p className="text-sm text-base-content/50 py-4 text-center">此分類沒有設定檢查清單項目</p>
+            ) : (
+              <ChecklistFields
+                items={dailyReportItems}
+                values={dailyReportValues}
+                onChange={(key, v) => setDailyReportValues((prev) => ({ ...prev, [key]: v }))}
+                rentalNumber={dailyReportGroup!.rental_number}
+                onUploadPhoto={uploadChecklistPhoto}
+              />
+            )}
           </div>
 
           {isDailyReportBackfill && (
@@ -894,10 +1017,10 @@ export function Rentals() {
           )}
 
           <div className="modal-action">
-            <button className="btn btn-sm" onClick={() => setDailyReportGroup(null)}>取消</button>
+            <button className="btn btn-sm" onClick={closeDailyReportDialog}>取消</button>
             <button
               className="btn btn-primary btn-sm gap-1"
-              disabled={dailyReportSubmitting || !dailyReportDate || (isDailyReportBackfill && !dailyReportBackfillReason.trim())}
+              disabled={dailyReportSubmitting || !dailyReportDate || !dailyReportRequiredFilled || (isDailyReportBackfill && !dailyReportBackfillReason.trim())}
               onClick={confirmDailyReport}
             >
               {dailyReportSubmitting && <span className="loading loading-spinner loading-xs"></span>}
@@ -906,7 +1029,50 @@ export function Rentals() {
           </div>
         </div>
         <form method="dialog" className="modal-backdrop">
-          <button onClick={() => setDailyReportGroup(null)}>close</button>
+          <button onClick={closeDailyReportDialog}>close</button>
+        </form>
+      </dialog>
+
+      {/* 分類注意事項同意 dialog（Phase 3）——攔截提交，須全部勾選同意才能繼續 */}
+      <dialog className={`modal ${noticePending.length > 0 ? "modal-open" : ""}`}>
+        <div className="modal-box max-w-xl">
+          <h3 className="font-bold text-lg">請詳閱以下注意事項</h3>
+          <p className="text-sm text-base-content/60 mt-1">此次租借涉及的分類設有使用須知，需全部閱讀並同意才能送出申請</p>
+
+          <div className="space-y-3 mt-4 max-h-[50vh] overflow-y-auto">
+            {noticePending.map((n) => (
+              <div key={n.category_id} className="p-3 rounded border border-base-300">
+                <div
+                  className="text-sm [&_img]:max-w-full [&_img]:rounded [&_p]:my-1"
+                  dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(n.content) }}
+                />
+                <label className="flex items-center gap-2 text-sm mt-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="checkbox checkbox-sm"
+                    checked={!!noticeAgreed[n.category_id]}
+                    onChange={(e) => setNoticeAgreed((prev) => ({ ...prev, [n.category_id]: e.target.checked }))}
+                  />
+                  我已閱讀並同意
+                </label>
+              </div>
+            ))}
+          </div>
+
+          <div className="modal-action">
+            <button className="btn btn-sm" onClick={() => setNoticePending([])}>{t("common.cancel")}</button>
+            <button
+              className="btn btn-primary btn-sm gap-1"
+              disabled={noticeSubmitting || !allNoticesAgreed}
+              onClick={confirmNoticesAndCreate}
+            >
+              {noticeSubmitting && <span className="loading loading-spinner loading-xs"></span>}
+              同意並送出申請
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop">
+          <button onClick={() => setNoticePending([])}>close</button>
         </form>
       </dialog>
     </div>
