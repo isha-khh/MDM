@@ -22,7 +22,8 @@ const rentalSelectColumns = `r.id, r.asset_id, r.device_udid, r.borrower_id, r.b
 	             COALESCE(d.device_name,'') as device_name, COALESCE(d.serial_number,'') as device_serial,
 	             COALESCE(a.asset_number,'') as asset_number, COALESCE(a.name,'') as asset_name,
 	             a.custodian_id, COALESCE(a.custodian_name,'') as custodian_name,
-	             r.rental_number, r.is_archived, r.return_checklist, r.return_notes, r.multi_day_reason, a.category_id`
+	             r.rental_number, r.is_archived, r.return_checklist, r.return_notes, r.multi_day_reason, a.category_id,
+	             r.return_checklist_reported, r.return_reported_by, r.return_reported_at, r.return_verified_by, r.cross_day_reason`
 
 const rentalFromJoin = `FROM rentals r
 	LEFT JOIN assets a ON a.id = r.asset_id
@@ -34,8 +35,8 @@ func scanRental(rows interface {
 	rental := &domain.Rental{}
 	var assetID, approverID *string
 	var deviceUdid *string
-	var expectedReturn, actualReturn *time.Time
-	var checklistJSON []byte
+	var expectedReturn, actualReturn, returnReportedAt *time.Time
+	var checklistJSON, checklistReportedJSON []byte
 	err := rows.Scan(
 		&rental.ID, &assetID, &deviceUdid, &rental.BorrowerID, &rental.BorrowerName,
 		&approverID, &rental.ApproverName,
@@ -46,6 +47,7 @@ func scanRental(rows interface {
 		&rental.CustodianID, &rental.CustodianName,
 		&rental.RentalNumber, &rental.IsArchived, &checklistJSON, &rental.ReturnNotes,
 		&rental.MultiDayReason, &rental.CategoryID,
+		&checklistReportedJSON, &rental.ReturnReportedBy, &returnReportedAt, &rental.ReturnVerifiedBy, &rental.CrossDayReason,
 	)
 	if err != nil {
 		return nil, err
@@ -57,8 +59,12 @@ func scanRental(rows interface {
 	rental.ApproverID = approverID
 	rental.ExpectedReturn = expectedReturn
 	rental.ActualReturn = actualReturn
+	rental.ReturnReportedAt = returnReportedAt
 	if len(checklistJSON) > 0 {
 		json.Unmarshal(checklistJSON, &rental.ReturnChecklist)
+	}
+	if len(checklistReportedJSON) > 0 {
+		json.Unmarshal(checklistReportedJSON, &rental.ReturnChecklistReported)
 	}
 	return rental, nil
 }
@@ -166,12 +172,30 @@ func (r *RentalRepo) ActivateByNumber(ctx context.Context, rentalNumber int) err
 	return err
 }
 
-func (r *RentalRepo) ReturnByNumber(ctx context.Context, rentalNumber int, checklist []byte, notes string) error {
+// SubmitReturnByNumber is stage 1 of the two-stage return flow: the borrower
+// (or an admin) reports the checklist while the devices are still in their
+// hands — status moves to 'pending_return', NOT 'returned', and
+// assets.current_holder is deliberately left untouched by the caller until
+// stage 2 confirms the devices are physically back.
+func (r *RentalRepo) SubmitReturnByNumber(ctx context.Context, rentalNumber int, checklist []byte, reportedBy string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE rentals SET status='pending_return', return_checklist_reported=$1, return_reported_by=$2, return_reported_at=now(), updated_at=now()
+		 WHERE rental_number=$3 AND status='active'`,
+		checklist, reportedBy, rentalNumber)
+	return err
+}
+
+// ReturnByNumber is stage 2 (verify): the custodian/admin confirms — or
+// corrects — the borrower's stage-1 submission. Only legal from
+// 'pending_return' now (not directly from 'active'); crossDayReason is
+// stored as-is (empty string when not applicable/not provided) — the
+// caller is responsible for having required it when actually needed.
+func (r *RentalRepo) ReturnByNumber(ctx context.Context, rentalNumber int, checklist []byte, notes string, verifiedBy string, crossDayReason string) error {
 	_, err := r.pool.Exec(ctx,
 		`UPDATE rentals SET status='returned', actual_return=now(), updated_at=now(),
-		 return_checklist=$1, return_notes=$2
-		 WHERE rental_number=$3 AND status='active'`,
-		checklist, notes, rentalNumber)
+		 return_checklist=$1, return_notes=$2, return_verified_by=$3, cross_day_reason=$4
+		 WHERE rental_number=$5 AND status='pending_return'`,
+		checklist, notes, verifiedBy, crossDayReason, rentalNumber)
 	return err
 }
 

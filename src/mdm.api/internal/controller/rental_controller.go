@@ -289,6 +289,14 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 				"rental_number": rl.RentalNumber, "is_archived": rl.IsArchived,
 				"return_checklist": rl.ReturnChecklist, "return_notes": rl.ReturnNotes,
 				"multi_day_reason": rl.MultiDayReason, "category_id": rl.CategoryID,
+				"return_checklist_reported": rl.ReturnChecklistReported,
+				"return_reported_by":        rl.ReturnReportedBy,
+				"cross_day_reason":          rl.CrossDayReason,
+			}
+			if rl.ReturnReportedAt != nil {
+				row["return_reported_at"] = rl.ReturnReportedAt.Format(time.RFC3339)
+			} else {
+				row["return_reported_at"] = nil
 			}
 			if rl.CategoryID != nil {
 				dailyTracking, dErr := c.rentalRuleRepo.ResolveDailyTrackingRequired(r.Context(), categoriesCache, *rl.CategoryID)
@@ -514,14 +522,14 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 }
 
 // handleRentalByID godoc
-// @Summary 借用單操作：approve / activate / return / reject / delete
+// @Summary 借用單操作：approve / activate / submit-return / return / reject / delete
 // @Tags Rental
 // @Accept json
 // @Produce json
 // @Security BearerAuth
 // @Param id path string true "借用單 ID"
-// @Param action path string false "操作" Enums(approve,activate,return,reject)
-// @Param body body swagReturnReq false "歸還資訊（return 時使用）"
+// @Param action path string false "操作" Enums(approve,activate,submit-return,return,reject,daily-report)
+// @Param body body swagReturnReq false "歸還核對資訊（return 時使用，見 swagSubmitReturnReq 為 submit-return 時使用）"
 // @Success 200 {object} swagOK
 // @Failure 400 {object} swagError
 // @Failure 404 {object} swagError
@@ -600,21 +608,95 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 			log.Printf("[rental] batch activated: rental_number=%d borrower=%s", rental.RentalNumber, borrowerName)
 			writeJSON(w, map[string]interface{}{"ok": true, "status": "active"})
 
-		case "return":
+		case "submit-return":
 			if rental.Status != "active" {
 				writeError(w, http.StatusBadRequest, "rental is not active")
 				return
 			}
-			var returnBody struct {
+			// Stage 1: the borrower (or an admin on their behalf) reports the
+			// checklist while the devices are still in their hands.
+			borrowerID, borrowerName, err := c.rentalRepo.GetBorrowerInfo(r.Context(), rental.ID)
+			if err != nil {
+				writeError(w, http.StatusNotFound, "rental not found")
+				return
+			}
+			if claims.UserID != borrowerID && claims.Role != "admin" {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			var submitBody struct {
 				Notes     string                 `json:"notes"`
 				Checklist map[string]interface{} `json:"checklist"`
 			}
+			json.NewDecoder(r.Body).Decode(&submitBody)
+			var reportedJSON []byte
+			if submitBody.Checklist != nil {
+				reportedJSON, _ = json.Marshal(submitBody.Checklist)
+			}
+			if err := c.rentalRepo.SubmitReturnByNumber(r.Context(), rental.RentalNumber, reportedJSON, claims.UserID); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			// If this rental is under daily tracking, today's submit-return
+			// also counts as today's daily report — otherwise the day the
+			// devices actually come back would be the one day with no entry.
+			if required, _ := c.resolveDailyTrackingRequiredForRentalNumber(r.Context(), rental.RentalNumber); required {
+				today := dateOnly(time.Now())
+				if exists, _ := c.dailyReportRepo.ExistsForDate(r.Context(), rental.RentalNumber, today); !exists {
+					reportedBy := claims.UserID
+					c.dailyReportRepo.Create(r.Context(), &domain.RentalDailyReport{
+						RentalNumber: rental.RentalNumber, ReportDate: today,
+						Checklist: submitBody.Checklist, ReportedBy: &reportedBy,
+					})
+				}
+			}
+			// Notify custodian(s) there's a return pending their verification.
+			go func() {
+				bgCtx := context.Background()
+				data := c.buildNotifyData(bgCtx, rental.RentalNumber, borrowerName, "", "", submitBody.Notes, nil)
+				assetIDs, _ := c.rentalRepo.ListAssetIDsByNumber(bgCtx, rental.RentalNumber)
+				notified := map[string]bool{}
+				for _, aid := range assetIDs {
+					a, err := c.assetRepo.GetByID(bgCtx, aid)
+					if err != nil || a == nil || a.CustodianID == nil || *a.CustodianID == "" {
+						continue
+					}
+					custodian, err := c.userRepo.GetByID(bgCtx, *a.CustodianID)
+					if err == nil && custodian.Email != "" && !notified[custodian.Email] {
+						c.notifySvc.SendRentalPendingVerification(bgCtx, data, custodian.Email)
+						notified[custodian.Email] = true
+					}
+				}
+			}()
+			log.Printf("[rental] batch return reported: rental_number=%d reporter=%s", rental.RentalNumber, claims.Username)
+			writeJSON(w, map[string]interface{}{"ok": true, "status": "pending_return"})
+
+		case "return":
+			if rental.Status != "pending_return" {
+				writeError(w, http.StatusBadRequest, "rental is not pending return")
+				return
+			}
+			var returnBody struct {
+				Notes          string                 `json:"notes"`
+				Checklist      map[string]interface{} `json:"checklist"`
+				CrossDayReason string                 `json:"cross_day_reason"`
+			}
 			json.NewDecoder(r.Body).Decode(&returnBody)
+
+			// 逐日追蹤分類：實際歸還（今天）晚於預計歸還日期時，不硬擋，但強制
+			// 要求填寫逾期原因，供事後查閱。
+			if required, _ := c.resolveDailyTrackingRequiredForRentalNumber(r.Context(), rental.RentalNumber); required {
+				if rental.ExpectedReturn != nil && dateOnly(time.Now()).After(dateOnly(*rental.ExpectedReturn)) && strings.TrimSpace(returnBody.CrossDayReason) == "" {
+					writeError(w, http.StatusBadRequest, "已超過預計歸還日期，需填寫逾期原因")
+					return
+				}
+			}
+
 			var checklistJSON []byte
 			if returnBody.Checklist != nil {
 				checklistJSON, _ = json.Marshal(returnBody.Checklist)
 			}
-			c.rentalRepo.ReturnByNumber(r.Context(), rental.RentalNumber, checklistJSON, returnBody.Notes)
+			c.rentalRepo.ReturnByNumber(r.Context(), rental.RentalNumber, checklistJSON, returnBody.Notes, claims.UserID, strings.TrimSpace(returnBody.CrossDayReason))
 			assetIDs, _ := c.rentalRepo.ListAssetIDsByNumber(r.Context(), rental.RentalNumber)
 			for _, aid := range assetIDs {
 				c.assetRepo.ClearHolderByID(r.Context(), aid)

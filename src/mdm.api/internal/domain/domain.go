@@ -210,7 +210,7 @@ type Rental struct {
 	ApproverName    string
 	CustodianID     *string
 	CustodianName   string
-	Status          string // pending, approved, active, returned, rejected
+	Status          string // pending, approved, active, pending_return, returned, rejected
 	Purpose         string
 	BorrowDate      time.Time
 	ExpectedReturn  *time.Time
@@ -218,8 +218,19 @@ type Rental struct {
 	Notes           string
 	RentalNumber    int
 	IsArchived      bool
-	ReturnChecklist map[string]interface{}
+	ReturnChecklist map[string]interface{} // final version, written at stage 2 (verify)
 	ReturnNotes     string
+	// ReturnChecklistReported is the borrower's stage-1 submission (see
+	// "submit-return") — kept separate from ReturnChecklist (the custodian's
+	// stage-2, verified version) so both are available for audit comparison.
+	ReturnChecklistReported map[string]interface{}
+	ReturnReportedBy        *string
+	ReturnReportedAt        *time.Time
+	ReturnVerifiedBy        *string
+	// CrossDayReason is required at stage-2 verify when today (actual_return)
+	// is later than ExpectedReturn for a daily_tracking_required rental —
+	// not a hard block, just an audited explanation for the overrun.
+	CrossDayReason string
 	// MultiDayReason is the required justification when the rental spans more
 	// than one calendar day AND at least one involved asset's category is
 	// flagged daily_tracking_required (see CategoryRentalRule) — e.g. a

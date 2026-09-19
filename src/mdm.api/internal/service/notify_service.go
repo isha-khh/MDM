@@ -92,6 +92,15 @@ func (s *NotifyService) SendRentalReturned(ctx context.Context, data RentalNotif
 		"rental_returned.html", data)
 }
 
+// SendRentalPendingVerification sends email to custodian when the borrower
+// has submitted stage-1 of the two-stage return (see RentalController's
+// "submit-return"), asking them to verify and complete stage 2.
+func (s *NotifyService) SendRentalPendingVerification(ctx context.Context, data RentalNotifyData, recipientEmail string) {
+	s.sendNotification(ctx, "rental_pending_verification", recipientEmail, data.RentalNumber,
+		fmt.Sprintf("[MDM] 有一筆待核對的歸還 — #%d", data.RentalNumber),
+		"rental_pending_verification.html", data)
+}
+
 func (s *NotifyService) sendNotification(ctx context.Context, event, recipient string, rentalNumber int, subject, tmplName string, data interface{}) {
 	// Render template
 	var body bytes.Buffer

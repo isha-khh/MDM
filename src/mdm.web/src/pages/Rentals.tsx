@@ -54,6 +54,8 @@ interface Rental {
   category_id?: string | null;
   return_checklist?: ChecklistAnswers;
   return_notes?: string;
+  return_checklist_reported?: ChecklistAnswers;
+  cross_day_reason?: string;
   multi_day_reason?: string;
   daily_tracking_required?: boolean;
 }
@@ -74,6 +76,8 @@ interface RentalGroup {
   custodian_id?: string;
   return_checklist?: ChecklistAnswers;
   return_notes?: string;
+  return_checklist_reported?: ChecklistAnswers;
+  cross_day_reason?: string;
   multi_day_reason?: string;
   daily_tracking_required?: boolean;
 }
@@ -93,11 +97,12 @@ interface UserOption {
 }
 
 const statusConfig: Record<string, { label: string; badge: string; icon: React.ReactNode }> = {
-  pending:  { label: "待核准", badge: "badge-warning",  icon: <Clock size={14} /> },
-  approved: { label: "已核准", badge: "badge-info",     icon: <Check size={14} /> },
-  active:   { label: "借出中", badge: "badge-success",  icon: <Play size={14} /> },
-  returned: { label: "已歸還", badge: "badge-ghost",    icon: <RotateCcw size={14} /> },
-  rejected: { label: "已拒絕", badge: "badge-error",    icon: <X size={14} /> },
+  pending:        { label: "待核准", badge: "badge-warning", icon: <Clock size={14} /> },
+  approved:       { label: "已核准", badge: "badge-info",    icon: <Check size={14} /> },
+  active:         { label: "借出中", badge: "badge-success", icon: <Play size={14} /> },
+  pending_return: { label: "待核對", badge: "badge-info",    icon: <Clock size={14} /> },
+  returned:       { label: "已歸還", badge: "badge-ghost",   icon: <RotateCcw size={14} /> },
+  rejected:       { label: "已拒絕", badge: "badge-error",   icon: <X size={14} /> },
 };
 
 function groupByRentalNumber(rentals: Rental[]): RentalGroup[] {
@@ -126,6 +131,8 @@ function groupByRentalNumber(rentals: Rental[]): RentalGroup[] {
       custodian_id: first.custodian_id,
       return_checklist: first.return_checklist,
       return_notes: first.return_notes,
+      return_checklist_reported: first.return_checklist_reported,
+      cross_day_reason: first.cross_day_reason,
       multi_day_reason: first.multi_day_reason,
       // Union across the batch, matching the backend's own union policy for
       // "does this batch touch any daily-tracking category".
@@ -419,19 +426,39 @@ export function Rentals() {
   };
 
   // Return dialog state — checklist items are resolved dynamically per the
-  // batch's asset categories (Phase 2a), replacing the previous hardcoded 5.
+  // batch's asset categories (Phase 2a). Phase 2b splits the actual submit
+  // into two stages sharing this one dialog shell: "submit" is the borrower
+  // (or admin) reporting while the devices are still with them, "verify" is
+  // the custodian (or admin) confirming/correcting that report before the
+  // devices are marked returned.
   const [returnGroup, setReturnGroup] = useState<RentalGroup | null>(null);
+  const [returnStage, setReturnStage] = useState<"submit" | "verify">("submit");
   const [returnItems, setReturnItems] = useState<ChecklistItem[]>([]);
   const [returnItemsLoading, setReturnItemsLoading] = useState(false);
   const [returnValues, setReturnValues] = useState<ChecklistAnswers>({});
   const [returnNotes, setReturnNotes] = useState("");
+  const [crossDayReason, setCrossDayReason] = useState("");
 
   const allRequiredFilled = returnItems.every((item) => isChecklistItemFilled(item, returnValues[item.key]));
+  // Only relevant at the verify stage: a daily-tracking rental that's being
+  // verified after its expected_return date needs an overrun explanation —
+  // mirrors the backend's own check, just surfaced before submit instead of
+  // rejected after.
+  const isOverdueVerify = returnStage === "verify" && !!returnGroup?.daily_tracking_required
+    && !!returnGroup?.expected_return && todayStr() > returnGroup.expected_return;
 
-  const openReturnDialog = async (group: RentalGroup) => {
+  // Read-only history shown alongside the verify-stage dialog for
+  // daily-tracking rentals, so the custodian can sanity-check the reported
+  // checklist against each day's individual entry before confirming.
+  const [verifyDailyReports, setVerifyDailyReports] = useState<DailyReport[]>([]);
+
+  const openReturnDialog = async (group: RentalGroup, stage: "submit" | "verify") => {
     setReturnGroup(group);
-    setReturnValues({});
+    setReturnStage(stage);
+    setReturnValues(stage === "verify" ? (group.return_checklist_reported || {}) : {});
     setReturnNotes("");
+    setCrossDayReason("");
+    setVerifyDailyReports([]);
     setReturnItemsLoading(true);
     try {
       const categoryIds = Array.from(new Set(group.rentals.map((rl) => rl.category_id).filter((v): v is string => !!v)));
@@ -442,6 +469,13 @@ export function Rentals() {
     } catch {
       setReturnItems([]);
     } finally { setReturnItemsLoading(false); }
+
+    if (stage === "verify" && group.daily_tracking_required) {
+      try {
+        const { data } = await apiClient.get(`/api/rentals/${group.rentals[0].id}/daily-reports`);
+        setVerifyDailyReports(data.reports || []);
+      } catch { /* best-effort, not required to complete verification */ }
+    }
   };
 
   // Daily report dialog (逐日追蹤分類：每日回報，跟歸還是分開的動作)
@@ -506,14 +540,23 @@ export function Rentals() {
   const confirmReturn = async () => {
     if (!returnGroup) return;
     try {
-      await apiClient.post(`/api/rentals/${returnGroup.rentals[0].id}/return`, {
-        notes: returnNotes,
-        checklist: returnValues,
-      });
+      if (returnStage === "submit") {
+        await apiClient.post(`/api/rentals/${returnGroup.rentals[0].id}/submit-return`, {
+          notes: returnNotes,
+          checklist: returnValues,
+        });
+      } else {
+        await apiClient.post(`/api/rentals/${returnGroup.rentals[0].id}/return`, {
+          notes: returnNotes,
+          checklist: returnValues,
+          cross_day_reason: crossDayReason,
+        });
+      }
       setReturnGroup(null);
       loadRentals();
-    } catch (err) {
-      await dialog.error("歸還失敗: " + (err instanceof Error ? err.message : ""));
+    } catch (err: unknown) {
+      const resp = (err as { response?: { data?: { error?: string } } })?.response?.data;
+      await dialog.error(resp?.error || "歸還失敗: " + (err instanceof Error ? err.message : ""));
     }
   };
 
@@ -680,8 +723,11 @@ export function Rentals() {
             {g.status === "approved" && isAdmin && (
               <button onClick={() => doAction(firstRentalId, "activate")} className="btn btn-primary btn-xs gap-1"><Play size={12} /> 借出</button>
             )}
-            {g.status === "active" && canApprove(g) && (
-              <button onClick={() => openReturnDialog(g)} className="btn btn-warning btn-xs gap-1"><RotateCcw size={12} /> 歸還</button>
+            {g.status === "active" && (isAdmin || g.borrower_id === user?.id) && (
+              <button onClick={() => openReturnDialog(g, "submit")} className="btn btn-warning btn-xs gap-1"><RotateCcw size={12} /> 我要歸還</button>
+            )}
+            {g.status === "pending_return" && canApprove(g) && (
+              <button onClick={() => openReturnDialog(g, "verify")} className="btn btn-info btn-xs gap-1"><CheckCircle size={12} /> 核對歸還</button>
             )}
             {g.status === "active" && g.daily_tracking_required && (isAdmin || g.borrower_id === user?.id) && (
               <button onClick={() => openDailyReport(g)} className="btn btn-outline btn-xs gap-1"><Gauge size={12} /> 每日回報</button>
@@ -747,6 +793,7 @@ export function Rentals() {
             <option value="pending">待核准</option>
             <option value="approved">已核准</option>
             <option value="active">借出中</option>
+            <option value="pending_return">待核對</option>
             <option value="returned">已歸還</option>
             <option value="rejected">已拒絕</option>
           </select>
@@ -913,6 +960,9 @@ export function Rentals() {
         <ArrowRight size={12} />
         <span className="badge badge-success badge-xs">借出中</span>
         <ArrowRight size={12} />
+        <span className="badge badge-info badge-xs">待核對</span>
+        <span className="text-base-content/30">借用人回報，保管人核對</span>
+        <ArrowRight size={12} />
         <span className="badge badge-ghost badge-xs">已歸還</span>
       </div>
 
@@ -955,8 +1005,31 @@ export function Rentals() {
       {/* Return checklist dialog — items resolved dynamically per分類 (Phase 2a) */}
       <dialog className={`modal ${returnGroup ? "modal-open" : ""}`}>
         <div className="modal-box">
-          <h3 className="font-bold text-lg">裝置歸還清點</h3>
-          <p className="text-sm text-base-content/60 mt-1">請確認以下項目後完成歸還（整批裝置）</p>
+          <h3 className="font-bold text-lg">{returnStage === "submit" ? "歸還回報" : "歸還核對"}</h3>
+          <p className="text-sm text-base-content/60 mt-1">
+            {returnStage === "submit"
+              ? "請在裝置還在您手上時填寫以下項目（整批裝置），送出後由保管人核對"
+              : "請核對借用人回報的內容（可修正）後完成歸還（整批裝置）"}
+          </p>
+
+          {returnStage === "verify" && returnGroup?.daily_tracking_required && verifyDailyReports.length > 0 && (
+            <div className="mt-4 border border-base-300 rounded p-2">
+              <p className="text-xs font-medium opacity-70 mb-1">每日回報紀錄</p>
+              <div className="space-y-1">
+                {verifyDailyReports.map((rep) => (
+                  <div key={rep.id} className="flex items-center gap-2 text-xs">
+                    <span className="font-mono">{rep.report_date}</span>
+                    {rep.backfill_reason ? (
+                      <span className="badge badge-warning badge-xs" title={rep.backfill_reason}>補登</span>
+                    ) : (
+                      <span className="badge badge-ghost badge-xs">即時</span>
+                    )}
+                    <span className="opacity-70">{JSON.stringify(rep.checklist)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {returnItemsLoading ? (
             <div className="flex justify-center py-8"><span className="loading loading-spinner"></span></div>
@@ -1024,6 +1097,22 @@ export function Rentals() {
             />
           </div>
 
+          {isOverdueVerify && (
+            <div className="form-control mt-3">
+              <label className="label">
+                <span className="label-text text-sm">逾期原因（必填）</span>
+                <span className="label-text-alt opacity-60">已超過預計歸還日期 {returnGroup?.expected_return}</span>
+              </label>
+              <textarea
+                value={crossDayReason}
+                onChange={(e) => setCrossDayReason(e.target.value)}
+                placeholder="例如：交通延誤，隔天才歸還"
+                className="textarea textarea-bordered textarea-sm"
+                rows={2}
+              />
+            </div>
+          )}
+
           {!allRequiredFilled && (
             <div role="alert" className="alert alert-warning mt-4 py-2">
               <span className="text-sm">請完成所有必填清點項目</span>
@@ -1032,8 +1121,12 @@ export function Rentals() {
 
           <div className="modal-action">
             <button className="btn btn-sm" onClick={() => setReturnGroup(null)}>取消</button>
-            <button className="btn btn-warning btn-sm gap-1" disabled={!allRequiredFilled} onClick={confirmReturn}>
-              <RotateCcw size={14} /> 確認歸還
+            <button
+              className="btn btn-warning btn-sm gap-1"
+              disabled={!allRequiredFilled || (isOverdueVerify && !crossDayReason.trim())}
+              onClick={confirmReturn}
+            >
+              <RotateCcw size={14} /> {returnStage === "submit" ? "送出回報" : "確認歸還"}
             </button>
           </div>
         </div>
