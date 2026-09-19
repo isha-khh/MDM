@@ -9,7 +9,12 @@ interface CommandTrackerProps {
 
 export function CommandTracker({ open, onClose }: CommandTrackerProps) {
   const { t } = useTranslation();
-  const { trackedCommands, dismissCommand, clearCompletedCommands } = useEventStore();
+  // Selectors — see Layout.tsx for why a bare useEventStore() is worth
+  // avoiding here (re-renders on every incoming MDM event, not just when
+  // trackedCommands actually changes).
+  const trackedCommands = useEventStore((s) => s.trackedCommands);
+  const dismissCommand = useEventStore((s) => s.dismissCommand);
+  const clearCompletedCommands = useEventStore((s) => s.clearCompletedCommands);
 
   const statusIcon = {
     sent: <Clock size={14} className="text-warning animate-pulse" />,

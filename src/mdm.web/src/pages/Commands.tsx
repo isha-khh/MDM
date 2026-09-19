@@ -66,7 +66,12 @@ export function Commands() {
   const { t } = useTranslation();
   const dialog = useDialog();
   const { clients } = useAuthStore();
-  const { trackCommand } = useEventStore();
+  // trackCommand is a stable action reference (zustand actions never change
+  // identity), so selecting it means this page never re-renders from this
+  // store at all — a bare useEventStore() was instead subscribing to every
+  // field, including `events`, which is appended to on every incoming MDM
+  // event regardless of anything this page reads.
+  const trackCommand = useEventStore((s) => s.trackCommand);
   const [searchParams] = useSearchParams();
   const [selectedUdids, setSelectedUdids] = useState<string[]>(() => {
     const param = searchParams.get("udids");

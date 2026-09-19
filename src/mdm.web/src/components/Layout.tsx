@@ -130,7 +130,21 @@ function useNavFilter() {
 
 export function Layout() {
   const { user, logout } = useAuthStore();
-  const { streaming, setStreaming, unreadCount, markAllRead, trackedCommands } = useEventStore();
+  // Individual selectors, not a whole-store destructure: Layout wraps every
+  // page via <Outlet/>, and the event store's `events` array is appended to
+  // on every single incoming MDM event (device check-ins, command acks —
+  // arriving continuously and often, independent of user interaction). A
+  // bare `useEventStore()` subscribes to the *entire* store, so every one of
+  // those events was re-rendering the whole app, including whatever AG Grid
+  // happened to be mounted on the current page — the actual cause behind
+  // reports of the grid "stuttering" that had nothing to do with that grid
+  // itself. Selecting only the specific fields this component reads means
+  // Layout only re-renders when one of THOSE fields actually changes.
+  const streaming = useEventStore((s) => s.streaming);
+  const setStreaming = useEventStore((s) => s.setStreaming);
+  const unreadCount = useEventStore((s) => s.unreadCount);
+  const markAllRead = useEventStore((s) => s.markAllRead);
+  const trackedCommands = useEventStore((s) => s.trackedCommands);
   const { t, i18n } = useTranslation();
   const location = useLocation();
   const [theme, setTheme] = useState<"light" | "dark">(() =>

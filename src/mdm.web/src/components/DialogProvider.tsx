@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useRef } from "react";
+import { createContext, useContext, useState, useCallback, useMemo, useRef } from "react";
 import { AlertCircle, CheckCircle, Info } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -73,7 +73,14 @@ export function DialogProvider({ children }: { children: ReactNode }) {
     resolveRef.current = null;
   }, []);
 
-  const api = useCallback((): DialogContextValue => ({
+  // useMemo (not useCallback) — this is the context *value* itself, not a
+  // callback being handed somewhere. useCallback would only memoize the
+  // factory function; calling it inline below (`api()`) built a fresh object
+  // every render regardless, which invalidated useDialog() for every
+  // consumer app-wide on every DialogProvider render — cascading into
+  // unstable useCallback/useMemo deps downstream (e.g. AG Grid columnDefs
+  // rebuilding and cell renderers/icons remounting visibly).
+  const api = useMemo((): DialogContextValue => ({
     alert: (message, title) => show("alert", message, title).then(() => {}),
     confirm: (message, title) => show("confirm", message, title),
     error: (message, details, title) => show("error", message, title, details).then(() => {}),
@@ -81,7 +88,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
   }), [show]);
 
   return (
-    <DialogContext.Provider value={api()}>
+    <DialogContext.Provider value={api}>
       {children}
       <dialog className={`modal ${state.open ? "modal-open" : ""}`}>
         <div className="modal-box">
