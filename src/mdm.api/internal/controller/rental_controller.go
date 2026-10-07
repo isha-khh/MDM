@@ -584,6 +584,10 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 
 		switch action {
 		case "approve":
+			if !c.allowed(r.Context(), claims, domain.RentalApprove, rental.RentalNumber) {
+				writeError(w, http.StatusForbidden, "無權限執行此操作")
+				return
+			}
 			if rental.Status != "pending" {
 				writeError(w, http.StatusBadRequest, "rental is not pending")
 				return
@@ -602,6 +606,10 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, map[string]interface{}{"ok": true, "status": "approved"})
 
 		case "activate":
+			if !c.allowed(r.Context(), claims, domain.RentalActivate, rental.RentalNumber) {
+				writeError(w, http.StatusForbidden, "無權限執行此操作")
+				return
+			}
 			if rental.Status != "approved" {
 				writeError(w, http.StatusBadRequest, "rental is not approved")
 				return
@@ -688,6 +696,10 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, map[string]interface{}{"ok": true, "status": "pending_return"})
 
 		case "return":
+			if !c.allowed(r.Context(), claims, domain.RentalVerifyReturn, rental.RentalNumber) {
+				writeError(w, http.StatusForbidden, "無權限執行此操作")
+				return
+			}
 			if rental.Status != "pending_return" {
 				writeError(w, http.StatusBadRequest, "rental is not pending return")
 				return
@@ -781,6 +793,10 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, map[string]interface{}{"ok": true, "status": "returned"})
 
 		case "reject":
+			if !c.allowed(r.Context(), claims, domain.RentalReject, rental.RentalNumber) {
+				writeError(w, http.StatusForbidden, "無權限執行此操作")
+				return
+			}
 			if rental.Status != "pending" {
 				writeError(w, http.StatusBadRequest, "rental is not pending")
 				return
@@ -859,6 +875,10 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 		rental, err := c.rentalRepo.GetByID(r.Context(), id)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "rental not found")
+			return
+		}
+		if !c.allowed(r.Context(), claims, domain.RentalDelete, rental.RentalNumber) {
+			writeError(w, http.StatusForbidden, "無權限執行此操作")
 			return
 		}
 		c.rentalRepo.DeleteByNumber(r.Context(), rental.RentalNumber)

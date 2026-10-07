@@ -51,19 +51,22 @@ func (c *RentalController) batchCustodianIDs(ctx context.Context, rentalNumber i
 	return ids
 }
 
-// canDecideExtension: an admin, or the custodian of any asset in the batch —
-// the same people who can approve the rental itself. Enforced here rather
-// than only hiding the buttons in the UI.
-func (c *RentalController) canDecideExtension(ctx context.Context, claims *middleware.Claims, rentalNumber int) bool {
-	if claims.Role == "admin" {
-		return true
-	}
-	for _, id := range c.batchCustodianIDs(ctx, rentalNumber) {
-		if id == claims.UserID {
-			return true
+// allowed applies domain.CanPerformRentalAction for the current user against
+// a rental batch. The custodian lookup only runs for non-admins, since admins
+// pass every check that a custodian would. Enforced here on the server — the
+// UI only hides buttons.
+func (c *RentalController) allowed(ctx context.Context, claims *middleware.Claims, action domain.RentalAction, rentalNumber int) bool {
+	isAdmin := claims.Role == "admin"
+	isCustodian := false
+	if !isAdmin {
+		for _, id := range c.batchCustodianIDs(ctx, rentalNumber) {
+			if id == claims.UserID {
+				isCustodian = true
+				break
+			}
 		}
 	}
-	return false
+	return domain.CanPerformRentalAction(action, isAdmin, isCustodian)
 }
 
 // handleExtend godoc
@@ -183,7 +186,7 @@ func (c *RentalController) handleExtensionDecision(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusNotFound, "extension request not found")
 		return
 	}
-	if !c.canDecideExtension(r.Context(), claims, ext.RentalNumber) {
+	if !c.allowed(r.Context(), claims, domain.RentalDecideExtension, ext.RentalNumber) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
