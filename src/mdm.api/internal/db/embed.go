@@ -100,3 +100,6 @@ var Migration032SQL string
 
 //go:embed migrations/033_category_notice_images.up.sql
 var Migration033SQL string
+
+//go:embed migrations/034_rental_extensions.up.sql
+var Migration034SQL string

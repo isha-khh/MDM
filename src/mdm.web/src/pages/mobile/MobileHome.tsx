@@ -39,8 +39,14 @@ export function MobileHome() {
   const myGroups = groupByRentalNumber(rentals)
     .filter((g) => g.borrower_id === user?.id && (g.status === "active" || g.status === "pending_return"));
 
-  const pendingByRental = new Map<string, number>();
-  for (const p of pending) pendingByRental.set(p.rentalId, (pendingByRental.get(p.rentalId) || 0) + 1);
+  // Count queued daily reports per rental for the badge on that button;
+  // other queued actions (e.g. a renewal request) get their own marker below.
+  const queuedReports = new Map<string, number>();
+  const queuedExtend = new Set<string>();
+  for (const p of pending) {
+    if (p.type === "daily-report") queuedReports.set(p.rentalId, (queuedReports.get(p.rentalId) || 0) + 1);
+    if (p.type === "extend") queuedExtend.add(p.rentalId);
+  }
 
   return (
     <MobileShell title="我的租借">
@@ -78,7 +84,8 @@ export function MobileHome() {
       ) : (
         myGroups.map((g) => {
           const rentalId = g.rentals[0].id;
-          const queuedCount = pendingByRental.get(rentalId) || 0;
+          const queuedCount = queuedReports.get(rentalId) || 0;
+          const extendQueued = queuedExtend.has(rentalId);
           return (
             <div key={g.rental_number} className="card bg-base-100 border border-base-300 shadow-sm">
               <div className="card-body p-4 gap-3">
@@ -98,6 +105,13 @@ export function MobileHome() {
                     <div className="text-xs text-base-content/60">
                       借出 {g.borrow_date?.slice(0, 10)}　→　預計 {g.expected_return?.slice(0, 10) || "—"}
                     </div>
+                    {(g.pending_extension || extendQueued) && (
+                      <div className="text-xs text-warning-content bg-warning/10 rounded-lg px-3 py-2">
+                        {g.pending_extension
+                          ? `續借申請審核中（續借至 ${g.pending_extension.requested_expected_return}）`
+                          : "續借申請已存在裝置上，等待同步"}
+                      </div>
+                    )}
                     <div className="flex gap-2">
                       {g.daily_tracking_required && (
                         <Link to={`/m/rentals/${rentalId}/daily-report`} className="btn btn-primary btn-sm flex-1 relative">
@@ -109,6 +123,9 @@ export function MobileHome() {
                       )}
                       <Link to={`/m/rentals/${rentalId}/submit-return`} className="btn btn-outline btn-sm flex-1">我要歸還</Link>
                     </div>
+                    {!g.pending_extension && !extendQueued && (
+                      <Link to={`/m/rentals/${rentalId}/extend`} className="btn btn-ghost btn-sm">我要續借</Link>
+                    )}
                   </>
                 ) : (
                   <div className="text-xs text-base-content/60">已送出歸還回報，等待保管人核對</div>

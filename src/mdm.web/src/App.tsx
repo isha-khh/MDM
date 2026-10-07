@@ -37,6 +37,7 @@ import { wireAutoFlush } from "./lib/offlineQueue";
 const MobileHome = lazy(() => import("./pages/mobile/MobileHome").then((m) => ({ default: m.MobileHome })));
 const MobileDailyReport = lazy(() => import("./pages/mobile/MobileDailyReport").then((m) => ({ default: m.MobileDailyReport })));
 const MobileSubmitReturn = lazy(() => import("./pages/mobile/MobileSubmitReturn").then((m) => ({ default: m.MobileSubmitReturn })));
+const MobileExtend = lazy(() => import("./pages/mobile/MobileExtend").then((m) => ({ default: m.MobileExtend })));
 
 function MobileFallback() {
   return <div className="min-h-screen flex items-center justify-center bg-base-200"><span className="loading loading-spinner loading-lg text-primary"></span></div>;
@@ -123,6 +124,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <ModuleGuard module="rental" minLevel="requester">
               <Suspense fallback={<MobileFallback />}><MobileDailyReport /></Suspense>
+            </ModuleGuard>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/m/rentals/:rentalId/extend"
+        element={
+          <ProtectedRoute>
+            <ModuleGuard module="rental" minLevel="requester">
+              <Suspense fallback={<MobileFallback />}><MobileExtend /></Suspense>
             </ModuleGuard>
           </ProtectedRoute>
         }

@@ -48,6 +48,12 @@ type RentalNotifyData struct {
 	OverdueDays  int
 	Checklist    string
 	ReturnNotes  string
+
+	// Rental extension (續借) emails. ExpectedReturn above carries the date
+	// before the extension; these carry the requested/approved one.
+	NewExpectedReturn string
+	ExtensionReason   string
+	DecisionNote      string
 }
 
 // SendRentalRequest sends email to approver/custodian when a new rental is created.
@@ -99,6 +105,28 @@ func (s *NotifyService) SendRentalPendingVerification(ctx context.Context, data 
 	s.sendNotification(ctx, "rental_pending_verification", recipientEmail, data.RentalNumber,
 		fmt.Sprintf("[MDM] 有一筆待核對的歸還 — #%d", data.RentalNumber),
 		"rental_pending_verification.html", data)
+}
+
+// SendRentalExtensionRequest sends email to the custodian when a borrower
+// asks to extend an active rental, so they can approve or reject it.
+func (s *NotifyService) SendRentalExtensionRequest(ctx context.Context, data RentalNotifyData, recipientEmail string) {
+	s.sendNotification(ctx, "rental_extension_request", recipientEmail, data.RentalNumber,
+		fmt.Sprintf("[MDM] 有一筆續借申請待審核 — #%d", data.RentalNumber),
+		"rental_extension_request.html", data)
+}
+
+// SendRentalExtensionApproved tells the borrower the new expected return date is in effect.
+func (s *NotifyService) SendRentalExtensionApproved(ctx context.Context, data RentalNotifyData, recipientEmail string) {
+	s.sendNotification(ctx, "rental_extension_approved", recipientEmail, data.RentalNumber,
+		fmt.Sprintf("[MDM] 續借申請已核准 — #%d", data.RentalNumber),
+		"rental_extension_approved.html", data)
+}
+
+// SendRentalExtensionRejected tells the borrower the original return date stands.
+func (s *NotifyService) SendRentalExtensionRejected(ctx context.Context, data RentalNotifyData, recipientEmail string) {
+	s.sendNotification(ctx, "rental_extension_rejected", recipientEmail, data.RentalNumber,
+		fmt.Sprintf("[MDM] 續借申請未核准 — #%d", data.RentalNumber),
+		"rental_extension_rejected.html", data)
 }
 
 func (s *NotifyService) sendNotification(ctx context.Context, event, recipient string, rentalNumber int, subject, tmplName string, data interface{}) {

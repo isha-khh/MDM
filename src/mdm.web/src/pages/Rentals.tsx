@@ -8,13 +8,14 @@ import DOMPurify from "dompurify";
 import { useDialog } from "../components/DialogProvider";
 import {
   Check, X, RotateCcw, Play, UserPlus, Clock,
-  CheckCircle, AlertCircle, ArrowRight, FileDown, Archive, Plus, Trash2, Gauge,
+  CheckCircle, AlertCircle, ArrowRight, FileDown, Archive, Plus, Trash2, Gauge, CalendarPlus,
 } from "lucide-react";
 import type { ColDef, ICellRendererParams } from "ag-grid-enterprise";
 import { DataGrid } from "../components/DataGrid";
 import { type ChecklistItem, type ChecklistAnswers, isChecklistItemFilled } from "../lib/checklist";
 import { ChecklistFields } from "../components/ChecklistFields";
 import { type Rental, type RentalGroup, type DailyReport, groupByRentalNumber } from "../lib/rentalTypes";
+import { minExtendDate } from "../lib/dates";
 
 interface UserOption {
   id: string;
@@ -371,6 +372,63 @@ export function Rentals() {
     } finally { setDailyReportSubmitting(false); }
   };
 
+  // 續借（延長預計歸還日）：借用人/管理員申請 → 保管人/管理員審核，核准後
+  // 預計歸還日才會真的更新。
+  const [extendGroup, setExtendGroup] = useState<RentalGroup | null>(null);
+  const [extendDate, setExtendDate] = useState("");
+  const [extendReason, setExtendReason] = useState("");
+  const [extendSubmitting, setExtendSubmitting] = useState(false);
+  const [reviewGroup, setReviewGroup] = useState<RentalGroup | null>(null);
+  const [reviewNote, setReviewNote] = useState("");
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+
+  // The new date must be later than the current one and not in the past
+  // (an already-overdue rental can't be "renewed" to a date that's also past).
+  const extendMinDate = minExtendDate(extendGroup?.expected_return, todayStr());
+
+  const openExtendDialog = (group: RentalGroup) => {
+    setExtendGroup(group);
+    setExtendDate(minExtendDate(group.expected_return, todayStr()));
+    setExtendReason("");
+  };
+
+  const confirmExtend = async () => {
+    if (!extendGroup) return;
+    setExtendSubmitting(true);
+    try {
+      await apiClient.post(`/api/rentals/${extendGroup.rentals[0].id}/extend`, {
+        new_expected_return: extendDate,
+        reason: extendReason,
+      });
+      setExtendGroup(null);
+      loadRentals();
+      await dialog.success("續借申請已送出，待保管人／管理員審核後才會更新預計歸還日");
+    } catch (err: unknown) {
+      const resp = (err as { response?: { data?: { error?: string } } })?.response?.data;
+      await dialog.error(resp?.error || (err instanceof Error ? err.message : "續借申請失敗"));
+    } finally { setExtendSubmitting(false); }
+  };
+
+  const openReviewDialog = (group: RentalGroup) => {
+    setReviewGroup(group);
+    setReviewNote("");
+  };
+
+  const decideExtension = async (action: "approve" | "reject") => {
+    const ext = reviewGroup?.pending_extension;
+    if (!ext) return;
+    setReviewSubmitting(true);
+    try {
+      await apiClient.post(`/api/rental-extensions/${ext.id}/${action}`, { note: reviewNote });
+      setReviewGroup(null);
+      loadRentals();
+    } catch (err: unknown) {
+      const resp = (err as { response?: { data?: { error?: string } } })?.response?.data;
+      await dialog.error(resp?.error || (err instanceof Error ? err.message : "審核失敗"));
+      loadRentals();
+    } finally { setReviewSubmitting(false); }
+  };
+
   const doAction = async (rentalId: string, action: string) => {
     const labels: Record<string, string> = {
       approve: "核准此租借申請（整批）？",
@@ -558,12 +616,30 @@ export function Rentals() {
       cellClass: "text-sm opacity-70",
       valueFormatter: (p) => p.value ? new Date(p.value as string).toLocaleDateString() : "-",
     });
-    defs.push({ headerName: "預計歸還", field: "expected_return", width: 120, cellClass: "text-sm opacity-70", valueFormatter: (p) => p.value || "-" });
+    defs.push({
+      headerName: "預計歸還",
+      field: "expected_return",
+      width: 170,
+      cellClass: "text-sm",
+      cellRenderer: (p: ICellRendererParams<RentalGroup>) => (
+        <span>
+          <span className="opacity-70">{p.value || "-"}</span>
+          {p.data?.pending_extension && (
+            <span
+              className="badge badge-warning badge-xs ml-1 whitespace-nowrap"
+              title={`申請續借至 ${p.data.pending_extension.requested_expected_return}`}
+            >
+              續借審核中
+            </span>
+          )}
+        </span>
+      ),
+    });
     defs.push({ headerName: "核准人", field: "approver_name", width: 120, cellClass: "text-sm", valueFormatter: (p) => p.value || "-" });
     defs.push({
       headerName: "操作",
       colId: "actions",
-      width: 180,
+      width: 290,
       pinned: "right",
       sortable: false,
       filter: false,
@@ -589,6 +665,12 @@ export function Rentals() {
             )}
             {g.status === "active" && g.daily_tracking_required && (isAdmin || g.borrower_id === user?.id) && (
               <button onClick={() => openDailyReport(g)} className="btn btn-outline btn-xs gap-1"><Gauge size={12} /> 每日回報</button>
+            )}
+            {g.status === "active" && !g.pending_extension && (isAdmin || g.borrower_id === user?.id) && (
+              <button onClick={() => openExtendDialog(g)} className="btn btn-outline btn-xs gap-1"><CalendarPlus size={12} /> 續借</button>
+            )}
+            {g.status === "active" && g.pending_extension && canApprove(g) && (
+              <button onClick={() => openReviewDialog(g)} className="btn btn-warning btn-xs gap-1"><CheckCircle size={12} /> 審核續借</button>
             )}
           </div>
         );
@@ -1030,6 +1112,97 @@ export function Rentals() {
         </div>
         <form method="dialog" className="modal-backdrop">
           <button onClick={closeDailyReportDialog}>close</button>
+        </form>
+      </dialog>
+
+      {/* 續借申請 dialog */}
+      <dialog className={`modal ${extendGroup ? "modal-open" : ""}`}>
+        <div className="modal-box">
+          <h3 className="font-bold text-lg">申請續借</h3>
+          <p className="text-sm text-base-content/60 mt-1">
+            單號 {extendGroup?.rental_number}，目前預計歸還 {extendGroup?.expected_return || "-"}。送出後需經保管人／管理員審核，核准前預計歸還日不會改變。
+          </p>
+
+          <div className="form-control mt-4">
+            <label className="label"><span className="label-text text-sm">續借至</span></label>
+            <input
+              type="date"
+              value={extendDate}
+              min={extendMinDate}
+              onChange={(e) => setExtendDate(e.target.value)}
+              className="input input-bordered input-sm"
+            />
+          </div>
+
+          <div className="form-control mt-3">
+            <label className="label"><span className="label-text text-sm">續借原因（必填）</span></label>
+            <textarea
+              value={extendReason}
+              onChange={(e) => setExtendReason(e.target.value)}
+              placeholder="例如：出差行程延後"
+              className="textarea textarea-bordered textarea-sm"
+              rows={3}
+            />
+          </div>
+
+          <div className="modal-action">
+            <button className="btn btn-sm" onClick={() => setExtendGroup(null)}>取消</button>
+            <button
+              className="btn btn-primary btn-sm gap-1"
+              disabled={extendSubmitting || !extendDate || extendDate < extendMinDate || !extendReason.trim()}
+              onClick={confirmExtend}
+            >
+              {extendSubmitting && <span className="loading loading-spinner loading-xs"></span>}
+              <CalendarPlus size={14} /> 送出申請
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop">
+          <button onClick={() => setExtendGroup(null)}>close</button>
+        </form>
+      </dialog>
+
+      {/* 續借審核 dialog（保管人／管理員） */}
+      <dialog className={`modal ${reviewGroup?.pending_extension ? "modal-open" : ""}`}>
+        <div className="modal-box">
+          <h3 className="font-bold text-lg">審核續借</h3>
+          <p className="text-sm text-base-content/60 mt-1">
+            單號 {reviewGroup?.rental_number}・借用人 {reviewGroup?.borrower_name}
+          </p>
+
+          <div className="mt-4 rounded-lg border border-base-300 p-3 space-y-2 text-sm">
+            <div>
+              預計歸還：<span className="font-mono">{reviewGroup?.pending_extension?.previous_expected_return}</span>
+              <ArrowRight size={14} className="inline mx-1" />
+              <span className="font-mono font-bold">{reviewGroup?.pending_extension?.requested_expected_return}</span>
+            </div>
+            <div className="whitespace-pre-wrap">原因：{reviewGroup?.pending_extension?.reason}</div>
+            <div className="text-xs opacity-60">申請人：{reviewGroup?.pending_extension?.requested_by_name}</div>
+          </div>
+
+          <div className="form-control mt-3">
+            <label className="label"><span className="label-text text-sm">審核備註（選填，會寄給借用人）</span></label>
+            <textarea
+              value={reviewNote}
+              onChange={(e) => setReviewNote(e.target.value)}
+              className="textarea textarea-bordered textarea-sm"
+              rows={2}
+            />
+          </div>
+
+          <div className="modal-action">
+            <button className="btn btn-sm" onClick={() => setReviewGroup(null)}>取消</button>
+            <button className="btn btn-error btn-sm gap-1" disabled={reviewSubmitting} onClick={() => decideExtension("reject")}>
+              <AlertCircle size={14} /> 拒絕
+            </button>
+            <button className="btn btn-success btn-sm gap-1" disabled={reviewSubmitting} onClick={() => decideExtension("approve")}>
+              {reviewSubmitting && <span className="loading loading-spinner loading-xs"></span>}
+              <CheckCircle size={14} /> 核准
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop">
+          <button onClick={() => setReviewGroup(null)}>close</button>
         </form>
       </dialog>
 
