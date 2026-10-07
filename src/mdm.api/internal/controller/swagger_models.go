@@ -363,3 +363,15 @@ type swagNotificationItem struct {
 	ReferenceID *string `json:"reference_id"`
 	CreatedAt   string  `json:"created_at"`
 }
+
+// swagExtendReq is the body of POST /api/rentals/{id}/extend.
+type swagExtendReq struct {
+	NewExpectedReturn string `json:"new_expected_return" example:"2026-10-20"` // 新的預計歸還日 (YYYY-MM-DD)，必須晚於目前的預計歸還日
+	Reason            string `json:"reason" example:"出差行程延後"`                // 續借原因（必填）
+}
+
+// swagExtensionDecisionReq is the optional body of approve/reject on a
+// rental extension request.
+type swagExtensionDecisionReq struct {
+	Note string `json:"note" example:""` // 審核備註（選填），會一併寄給借用人
+}

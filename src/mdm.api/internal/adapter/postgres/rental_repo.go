@@ -259,6 +259,16 @@ func (r *RentalRepo) GetBorrowerInfo(ctx context.Context, rentalID string) (stri
 	return borrowerID, borrowerName, err
 }
 
+// GetBorrowerByNumber returns the borrower of a rental batch (every row of a
+// batch shares one borrower).
+func (r *RentalRepo) GetBorrowerByNumber(ctx context.Context, rentalNumber int) (string, string, error) {
+	var borrowerID, borrowerName string
+	err := r.pool.QueryRow(ctx,
+		`SELECT borrower_id, borrower_name FROM rentals WHERE rental_number=$1 LIMIT 1`, rentalNumber,
+	).Scan(&borrowerID, &borrowerName)
+	return borrowerID, borrowerName, err
+}
+
 // ListOverdue returns active rentals whose expected_return is before today (grouped by rental_number, one row per group).
 func (r *RentalRepo) ListOverdue(ctx context.Context) ([]*domain.Rental, error) {
 	q := `SELECT DISTINCT ON (r.rental_number) ` + rentalSelectColumns + ` ` + rentalFromJoin + `

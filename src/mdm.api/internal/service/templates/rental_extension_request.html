@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h2 style="color: #0277bd;">有一筆續借申請待審核</h2>
+  <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
+    <tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9; width: 120px;"><strong>單號</strong></td><td style="padding: 8px; border: 1px solid #ddd;">#{{.RentalNumber}}</td></tr>
+    <tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>借用人</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{.BorrowerName}}</td></tr>
+    <tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>裝置</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{range .DeviceNames}}{{.}}<br>{{end}}</td></tr>
+    <tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>目前預計歸還</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{.ExpectedReturn}}</td></tr>
+    <tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>申請續借至</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{.NewExpectedReturn}}</td></tr>
+    <tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>續借原因</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{.ExtensionReason}}</td></tr>
+  </table>
+  <p>借用人申請延長歸還日期，請登入系統審核。核准後預計歸還日才會更新。</p>
+  <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+  <p style="color: #999; font-size: 12px;">此信件由 MDM 管理平台自動發送，請勿直接回覆。</p>
+</body>
+</html>

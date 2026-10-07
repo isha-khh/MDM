@@ -29,12 +29,13 @@ type RentalController struct {
 	rentalRuleRepo  *postgres.CategoryRentalRuleRepo
 	dailyReportRepo *postgres.RentalDailyReportRepo
 	templateRepo    *postgres.ChecklistTemplateRepo
+	extensionRepo   *postgres.RentalExtensionRepo
 }
 
-func NewRentalController(rentalRepo *postgres.RentalRepo, assetRepo *postgres.AssetRepo, userRepo port.UserRepository, notifySvc *service.NotifyService, auth *middleware.AuthHelper, categoryRepo port.CategoryRepository, rentalRuleRepo *postgres.CategoryRentalRuleRepo, dailyReportRepo *postgres.RentalDailyReportRepo, templateRepo *postgres.ChecklistTemplateRepo) *RentalController {
+func NewRentalController(rentalRepo *postgres.RentalRepo, assetRepo *postgres.AssetRepo, userRepo port.UserRepository, notifySvc *service.NotifyService, auth *middleware.AuthHelper, categoryRepo port.CategoryRepository, rentalRuleRepo *postgres.CategoryRentalRuleRepo, dailyReportRepo *postgres.RentalDailyReportRepo, templateRepo *postgres.ChecklistTemplateRepo, extensionRepo *postgres.RentalExtensionRepo) *RentalController {
 	return &RentalController{
 		rentalRepo: rentalRepo, assetRepo: assetRepo, userRepo: userRepo, notifySvc: notifySvc, auth: auth,
-		categoryRepo: categoryRepo, rentalRuleRepo: rentalRuleRepo, dailyReportRepo: dailyReportRepo, templateRepo: templateRepo,
+		categoryRepo: categoryRepo, rentalRuleRepo: rentalRuleRepo, dailyReportRepo: dailyReportRepo, templateRepo: templateRepo, extensionRepo: extensionRepo,
 	}
 }
 
@@ -190,6 +191,7 @@ func (c *RentalController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/rentals/", c.handleRentalByID)
 	mux.HandleFunc("/api/rentals-archive", c.handleArchive)
 	mux.HandleFunc("/api/rental-pickable-assets", c.handlePickableAssets)
+	mux.HandleFunc("/api/rental-extensions/", c.handleExtensionDecision)
 }
 
 // handlePickableAssets godoc
@@ -282,6 +284,7 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 		// Fetched once and reused for every row's daily-tracking resolution
 		// below, rather than re-querying the (small) category tree per row.
 		categoriesCache, _ := c.categoryRepo.List(r.Context())
+		pendingExtensions, _ := c.extensionRepo.ListPending(r.Context())
 		rows := make([]map[string]interface{}, 0, len(rentals))
 		for _, rl := range rentals {
 			row := map[string]interface{}{
@@ -305,6 +308,11 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 				row["return_reported_at"] = rl.ReturnReportedAt.Format(time.RFC3339)
 			} else {
 				row["return_reported_at"] = nil
+			}
+			if ext := pendingExtensions[rl.RentalNumber]; ext != nil {
+				row["pending_extension"] = extensionJSON(ext)
+			} else {
+				row["pending_extension"] = nil
 			}
 			if rl.CategoryID != nil {
 				dailyTracking, dErr := c.rentalRuleRepo.ResolveDailyTrackingRequired(r.Context(), categoriesCache, *rl.CategoryID)
@@ -793,6 +801,9 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 		case "daily-report":
 			c.handleDailyReport(w, r, claims, rental)
 
+		case "extend":
+			c.handleExtend(w, r, claims, rental)
+
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 		}
@@ -822,6 +833,25 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 			})
 		}
 		writeJSON(w, map[string]interface{}{"reports": rows})
+		return
+	}
+
+	if r.Method == http.MethodGet && action == "extensions" {
+		rental, err := c.rentalRepo.GetByID(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "rental not found")
+			return
+		}
+		list, err := c.extensionRepo.ListByNumber(r.Context(), rental.RentalNumber)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		rows := make([]map[string]interface{}, 0, len(list))
+		for _, e := range list {
+			rows = append(rows, extensionJSON(e))
+		}
+		writeJSON(w, map[string]interface{}{"extensions": rows})
 		return
 	}
 

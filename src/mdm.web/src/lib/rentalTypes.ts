@@ -1,5 +1,18 @@
 import type { ChecklistAnswers } from "./checklist";
 
+// A borrower's pending request to extend a rental's expected return date
+// (續借); it only takes effect once a custodian/admin approves it.
+export interface RentalExtension {
+  id: string;
+  rental_number: number;
+  requested_by_name: string;
+  previous_expected_return: string;
+  requested_expected_return: string;
+  reason: string;
+  status: string;
+  created_at: string;
+}
+
 // Shared between the desktop admin view (Rentals.tsx) and the mobile
 // self-service pages — both read the same GET /api/rentals response and
 // group it into per-rental_number batches (every asset in a batch shares
@@ -33,6 +46,7 @@ export interface Rental {
   cross_day_reason?: string;
   multi_day_reason?: string;
   daily_tracking_required?: boolean;
+  pending_extension?: RentalExtension | null;
 }
 
 export interface RentalGroup {
@@ -55,6 +69,7 @@ export interface RentalGroup {
   cross_day_reason?: string;
   multi_day_reason?: string;
   daily_tracking_required?: boolean;
+  pending_extension?: RentalExtension | null;
 }
 
 export interface DailyReport {
@@ -94,6 +109,7 @@ export function groupByRentalNumber(rentals: Rental[]): RentalGroup[] {
       return_checklist_reported: first.return_checklist_reported,
       cross_day_reason: first.cross_day_reason,
       multi_day_reason: first.multi_day_reason,
+      pending_extension: first.pending_extension,
       // Union across the batch, matching the backend's own union policy for
       // "does this batch touch any daily-tracking category".
       daily_tracking_required: items.some((it) => it.daily_tracking_required),
