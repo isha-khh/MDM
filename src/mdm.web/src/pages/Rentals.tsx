@@ -15,6 +15,7 @@ import { DataGrid } from "../components/DataGrid";
 import { type ChecklistItem, type ChecklistAnswers, isChecklistItemFilled } from "../lib/checklist";
 import { ChecklistFields } from "../components/ChecklistFields";
 import { type Rental, type RentalGroup, type DailyReport, groupByRentalNumber } from "../lib/rentalTypes";
+import { minExtendDate } from "../lib/dates";
 
 interface UserOption {
   id: string;
@@ -30,12 +31,6 @@ const statusConfig: Record<string, { label: string; badge: string; icon: React.R
   returned:       { label: "已歸還", badge: "badge-ghost",   icon: <RotateCcw size={14} /> },
   rejected:       { label: "已拒絕", badge: "badge-error",   icon: <X size={14} /> },
 };
-
-function nextDay(iso: string): string {
-  const d = new Date(`${iso}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().slice(0, 10);
-}
 
 async function downloadExportExcel(ids?: string[]) {
   const params = new URLSearchParams();
@@ -389,16 +384,11 @@ export function Rentals() {
 
   // The new date must be later than the current one and not in the past
   // (an already-overdue rental can't be "renewed" to a date that's also past).
-  const extendMinDate = extendGroup?.expected_return
-    ? (nextDay(extendGroup.expected_return) > todayStr() ? nextDay(extendGroup.expected_return) : todayStr())
-    : todayStr();
+  const extendMinDate = minExtendDate(extendGroup?.expected_return, todayStr());
 
   const openExtendDialog = (group: RentalGroup) => {
-    const min = group.expected_return
-      ? (nextDay(group.expected_return) > todayStr() ? nextDay(group.expected_return) : todayStr())
-      : todayStr();
     setExtendGroup(group);
-    setExtendDate(min);
+    setExtendDate(minExtendDate(group.expected_return, todayStr()));
     setExtendReason("");
   };
 

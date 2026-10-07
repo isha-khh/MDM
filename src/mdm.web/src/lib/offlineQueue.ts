@@ -11,7 +11,7 @@ import type { ChecklistAnswers } from "./checklist";
 // getting back on the company VPN — returns. The desktop Rentals.tsx flows
 // are unaffected; they always require a live connection, same as before.
 
-export type PendingActionType = "daily-report" | "submit-return";
+export type PendingActionType = "daily-report" | "submit-return" | "extend";
 
 export interface PendingAction {
   id: string;
@@ -193,6 +193,7 @@ async function resolveChecklistPhotos(checklist: ChecklistAnswers, rentalNumber:
 const ENDPOINTS: Record<PendingActionType, (rentalId: string) => string> = {
   "daily-report": (id) => `/api/rentals/${id}/daily-report`,
   "submit-return": (id) => `/api/rentals/${id}/submit-return`,
+  extend: (id) => `/api/rentals/${id}/extend`,
 };
 
 let flushing = false;
