@@ -69,12 +69,15 @@ func splitList(v string) []string {
 
 // ParseDescription extracts the known "標籤：內容" lines. Unknown lines and
 // lines without a label are ignored; a missing label just leaves its field
-// empty.
+// empty. The first occurrence of a label wins: the summary block sits at the
+// top and an itinerary below it may reuse words like 地點 or 時間 for a single
+// stop, which must not override the trip's own header.
 func ParseDescription(desc string) Trip {
 	var t Trip
+	var seen = map[string]bool{}
 	for _, line := range strings.Split(stripHTML(desc), "\n") {
 		key, val, ok := splitLabel(strings.TrimSpace(line))
-		if !ok {
+		if !ok || seen[key] {
 			continue
 		}
 		switch key {
@@ -88,7 +91,10 @@ func ParseDescription(desc string) Trip {
 			t.Names = splitList(val)
 		case "信箱":
 			t.Emails = splitList(val)
+		default:
+			continue
 		}
+		seen[key] = true
 	}
 	return t
 }

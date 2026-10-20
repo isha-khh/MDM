@@ -29,6 +29,43 @@ func TestParseDescription(t *testing.T) {
 	}
 }
 
+// A real description from the shared calendar (company names and addresses
+// replaced): HTML line breaks, a separator, then an itinerary whose lines
+// contain half- and full-width colons and times.
+const realTripDescription = `地點： 苗栗、台中<br>時間：08:00-17:00<br>交通：高鐵＋租車<br>協會人員：張啓瑞 、劉名政、吳宜蓁<br>` +
+	`信箱：leonchang@mail.isha.org.tw、foylaou0326@mail.isha.org.tw、idsl5397@mail.isha.org.tw<br>` +
+	`--------------------------------------<br><br>` +
+	`<ol><li> 09:00-12:00：公司甲、公司乙（苗栗縣三義鄉西湖村伯公坑40之7號1樓）</li>` +
+	`<li>14:00-15:30：公司丙　（臺中市大雅區秀山里雅秀一路39號)</li></ol>`
+
+func TestParseDescription_RealWorldSample(t *testing.T) {
+	got := ParseDescription(realTripDescription)
+	want := Trip{
+		Location:  "苗栗、台中",
+		Time:      "08:00-17:00",
+		Transport: "高鐵＋租車",
+		Names:     []string{"張啓瑞", "劉名政", "吳宜蓁"},
+		Emails:    []string{"leonchang@mail.isha.org.tw", "foylaou0326@mail.isha.org.tw", "idsl5397@mail.isha.org.tw"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+	// Miaoli + Taichung: parsed fine, but not a destination that needs a car from Kaohsiung.
+	if LocationMatches(got.Location, DefaultTargetCounties) {
+		t.Error("the sample trip must not match the target counties")
+	}
+}
+
+func TestParseDescription_FirstLabelWinsOverLaterItineraryLines(t *testing.T) {
+	// An itinerary stop that happens to be labelled 地點 / 時間 / 信箱 must not
+	// replace the trip's header (otherwise a Miaoli trip could turn into a match).
+	d := realTripDescription + `<br>地點：高雄市前鎮區<br>時間：下午<br>信箱：someone-else@example.com`
+	got := ParseDescription(d)
+	if got.Location != "苗栗、台中" || got.Time != "08:00-17:00" || len(got.Emails) != 3 {
+		t.Errorf("later labels overrode the header: %+v", got)
+	}
+}
+
 func TestParseDescription_Tolerant(t *testing.T) {
 	// ASCII colon, unknown lines, no labels at all, empty input.
 	got := ParseDescription("備註 隨便寫\n地點:台南\n交通 : 租車\n沒有冒號的一行")
