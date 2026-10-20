@@ -679,6 +679,9 @@ type previewEvent struct {
 	CalendarID      string       `json:"calendar_id"`
 	CalendarSummary string       `json:"calendar_summary"`
 	Trip            tripcar.Trip `json:"trip"`
+	// Stops is set only for events written as one "廠商：" block per vendor.
+	// Trip then is the combined view; each stop is checked on its own.
+	Stops []tripcar.Trip `json:"stops,omitempty"`
 	// LocationUsed is what the destination check looked at: the "地點："line in
 	// the description if there is one, then the event's own location field, then
 	// the bracketed part of the title (e.g. "…進廠(臺南分局)").
@@ -710,20 +713,89 @@ type previewCandidate struct {
 	HasDriverLicense *bool  `json:"has_driver_license"`
 	HasOwnCar        *bool  `json:"has_own_car"`
 	Priority         int    `json:"priority"` // lower = approved first (no car of their own)
+	// Stops lists (by index into the event's Stops) where this person is going;
+	// only set for multi-vendor events.
+	Stops []int `json:"stops,omitempty"`
 	// From the notice log: sent / failed / pending, empty when never attempted.
 	NoticeStatus string `json:"notice_status,omitempty"`
 	NoticeSentAt string `json:"notice_sent_at,omitempty"`
 	NoticeError  string `json:"notice_error,omitempty"`
 }
 
-// formatProblems is the trip's missing required fields plus, when the names
-// and mailboxes can't be paired, a note saying so.
-func formatProblems(t tripcar.Trip) []string {
-	p := t.Missing()
-	if t.PairingProblem() {
-		p = append(p, "人員與信箱數量不一致")
+// formatProblems says what is wrong with the description format: required
+// fields left empty, or people listed without a mailbox. For a multi-vendor
+// event each problem names its vendor; one bad block holds back the whole
+// event.
+func formatProblems(stops []tripcar.Trip) []string {
+	multi := isMultiVendor(stops)
+	out := []string{}
+	for i, st := range stops {
+		prefix := ""
+		if multi {
+			name := st.Vendor
+			if name == "" {
+				name = fmt.Sprintf("第 %d 段", i+1)
+			}
+			prefix = name + "：缺 "
+		}
+		for _, m := range st.Missing() {
+			out = append(out, prefix+m)
+		}
+		if st.PairingProblem() {
+			msg := "有人員沒有對應的信箱"
+			if multi {
+				msg = stopLabel(st, i) + "：" + msg
+			}
+			out = append(out, msg)
+		}
 	}
-	return p
+	return out
+}
+
+func isMultiVendor(stops []tripcar.Trip) bool {
+	return len(stops) > 1 || (len(stops) == 1 && stops[0].Vendor != "")
+}
+
+func stopLabel(st tripcar.Trip, i int) string {
+	if st.Vendor != "" {
+		return st.Vendor
+	}
+	return fmt.Sprintf("第 %d 段", i+1)
+}
+
+// combineStops is the one-line view of a multi-vendor event used wherever a
+// single trip is shown: all stops' places and times, everyone's names and
+// mailboxes once.
+func combineStops(stops []tripcar.Trip) tripcar.Trip {
+	c := tripcar.Trip{Names: []string{}, Emails: []string{}}
+	seenName, seenMail, seenTransport := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	var locs, times, transports []string
+	for _, st := range stops {
+		if st.Location != "" {
+			locs = append(locs, st.Location)
+		}
+		if st.Time != "" {
+			times = append(times, st.Time)
+		}
+		if st.Transport != "" && !seenTransport[st.Transport] {
+			seenTransport[st.Transport] = true
+			transports = append(transports, st.Transport)
+		}
+		for _, n := range st.Names {
+			if !seenName[n] {
+				seenName[n] = true
+				c.Names = append(c.Names, n)
+			}
+		}
+		for _, m := range st.Emails {
+			if k := strings.ToLower(m); !seenMail[k] {
+				seenMail[k] = true
+				c.Emails = append(c.Emails, m)
+			}
+		}
+	}
+	c.Location, c.Time, c.Transport = strings.Join(locs, "；"), strings.Join(times, "；"), strings.Join(transports, "、")
+	return c
 }
 
 type previewCalendar struct {
@@ -758,14 +830,22 @@ func calendarDay(t time.Time) time.Time {
 // do with it. users == nil means the directory isn't available, so attendees
 // are left unevaluated rather than all reported as "not found".
 func buildPreviewEvent(cal google.Calendar, ev google.Event, users []tripcar.User, now time.Time) previewEvent {
-	trip := tripcar.ParseDescription(ev.Description)
+	stops := tripcar.ParseStops(ev.Description)
+	multi := isMultiVendor(stops)
+	trip := stops[0]
+	if multi {
+		trip = combineStops(stops)
+	}
 	if trip.Names == nil {
 		trip.Names = []string{}
 	}
 	if trip.Emails == nil {
 		trip.Emails = []string{}
 	}
-	p := previewEvent{Event: ev, CalendarID: cal.ID, CalendarSummary: cal.Summary, Trip: trip, Candidates: []previewCandidate{}, FormatMissing: formatProblems(trip)}
+	p := previewEvent{Event: ev, CalendarID: cal.ID, CalendarSummary: cal.Summary, Trip: trip, Candidates: []previewCandidate{}, FormatMissing: formatProblems(stops)}
+	if multi {
+		p.Stops = stops
+	}
 	switch {
 	case trip.Location != "":
 		p.LocationUsed, p.LocationSource = trip.Location, "description"
@@ -777,6 +857,16 @@ func buildPreviewEvent(cal google.Calendar, ev google.Event, users []tripcar.Use
 		}
 	}
 	p.TargetLocation = tripcar.LocationMatches(p.LocationUsed, tripcar.DefaultTargetCounties)
+	if multi {
+		// A stop outside the target counties doesn't make the event a target by
+		// itself, but any one stop inside them does.
+		p.TargetLocation = false
+		for _, st := range stops {
+			if tripcar.LocationMatches(st.Location, tripcar.DefaultTargetCounties) {
+				p.TargetLocation = true
+			}
+		}
+	}
 	if r := []rune(p.Description); len(r) > maxDescriptionChars {
 		p.Description, p.Truncated = string(r[:maxDescriptionChars]), true
 	}
@@ -790,19 +880,49 @@ func buildPreviewEvent(cal google.Calendar, ev google.Event, users []tripcar.Use
 	}
 
 	if p.TargetLocation && users != nil {
-		trip.Location = p.LocationUsed // judge by the destination actually found, wherever it came from
-		res := tripcar.Evaluate(trip, users, tripcar.DefaultTargetCounties)
-		tripcar.SortByPriority(res.Candidates)
-		for _, c := range res.Candidates {
-			pc := previewCandidate{Name: c.Name, Email: c.Email, Decision: string(c.Decision), Priority: tripcar.PriorityRank(c.User)}
-			if c.User != nil {
-				pc.Account, pc.DisplayName = c.User.SamAccountName, c.User.DisplayName
-				pc.HasDriverLicense, pc.HasOwnCar = c.User.HasDriverLicense, c.User.HasOwnCar
+		if !multi {
+			trip.Location = p.LocationUsed // judge by the destination actually found, wherever it came from
+			res := tripcar.Evaluate(trip, users, tripcar.DefaultTargetCounties)
+			tripcar.SortByPriority(res.Candidates)
+			for _, c := range res.Candidates {
+				p.Candidates = append(p.Candidates, toPreviewCandidate(c))
 			}
-			p.Candidates = append(p.Candidates, pc)
+		} else {
+			// One person is one candidate however many stops they are on: the
+			// same mailbox in two blocks is a single mail listing both stops.
+			index := map[string]int{}
+			for i, st := range stops {
+				if !tripcar.LocationMatches(st.Location, tripcar.DefaultTargetCounties) {
+					continue
+				}
+				for _, c := range tripcar.Evaluate(st, users, tripcar.DefaultTargetCounties).Candidates {
+					key := strings.ToLower(c.Email)
+					if key == "" {
+						key = "name:" + c.Name
+					}
+					if at, ok := index[key]; ok {
+						p.Candidates[at].Stops = append(p.Candidates[at].Stops, i)
+						continue
+					}
+					pc := toPreviewCandidate(c)
+					pc.Stops = []int{i}
+					index[key] = len(p.Candidates)
+					p.Candidates = append(p.Candidates, pc)
+				}
+			}
+			sort.SliceStable(p.Candidates, func(i, j int) bool { return p.Candidates[i].Priority < p.Candidates[j].Priority })
 		}
 	}
 	return p
+}
+
+func toPreviewCandidate(c tripcar.Candidate) previewCandidate {
+	pc := previewCandidate{Name: c.Name, Email: c.Email, Decision: string(c.Decision), Priority: tripcar.PriorityRank(c.User)}
+	if c.User != nil {
+		pc.Account, pc.DisplayName = c.User.SamAccountName, c.User.DisplayName
+		pc.HasDriverLicense, pc.HasOwnCar = c.User.HasDriverLicense, c.User.HasOwnCar
+	}
+	return pc
 }
 
 // startTime orders events for display. All-day events carry only a date; it

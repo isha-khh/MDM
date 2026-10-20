@@ -242,12 +242,22 @@ loop:
 				results = append(results, out)
 				continue
 			}
-			subject, html, err := tripcar.RenderNotice(tripcar.NoticeData{
+			data := tripcar.NoticeData{
 				Recipient: firstNonEmpty(cand.Name, cand.DisplayName, cand.Account),
 				Summary:   ev.Summary, Location: ev.LocationUsed,
 				Start: tripcar.StartLabel(start, ev.AllDay, taipei), Time: ev.Trip.Time, Transport: ev.Trip.Transport,
 				DaysUntil: ev.DaysUntil,
-			})
+			}
+			if len(ev.Stops) > 0 {
+				// One mail per person, listing each stop they are on.
+				for _, i := range cand.Stops {
+					if i >= 0 && i < len(ev.Stops) {
+						st := ev.Stops[i]
+						data.Stops = append(data.Stops, tripcar.NoticeStop{Vendor: st.Vendor, Location: st.Location, Time: st.Time, Transport: st.Transport})
+					}
+				}
+			}
+			subject, html, err := tripcar.RenderNotice(data)
 			if err == nil {
 				err = c.mailer.Send(ctx, cand.Email, subject, html)
 			}

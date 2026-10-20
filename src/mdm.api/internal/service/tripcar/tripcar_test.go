@@ -553,7 +553,7 @@ func TestTrip_PairingProblem(t *testing.T) {
 	cases := []struct {
 		names, emails int
 		want          bool
-	}{{2, 2, false}, {1, 1, false}, {3, 2, true}, {1, 2, true}, {0, 2, false}, {2, 0, false}}
+	}{{2, 2, false}, {1, 1, false}, {3, 2, true}, {1, 2, false}, {0, 2, false}, {2, 0, false}}
 	for _, c := range cases {
 		tr := Trip{Names: make([]string, c.names), Emails: make([]string, c.emails)}
 		if tr.PairingProblem() != c.want {
@@ -626,5 +626,113 @@ func TestRealAgreedSample_Evaluate(t *testing.T) {
 	}
 	if c1.Name != "吳宜蓁" || c1.Decision != NoLicense || c1.User.SamAccountName != "idsl5397" {
 		t.Errorf("second (explicitly no license, and the old account must not be picked): %+v", c1)
+	}
+}
+
+// The multi-vendor event from the calendar: one block per vendor, 地址 for the
+// destination, and a second mailbox on its own line under 信箱.
+const multiVendorSample = `廠商：台灣瑞環
+聯繫人：王秋琪 課長 06-6232280 #528
+時間：0900-1200
+地址：臺南市柳營區大農里環園西路二段19號
+交通：開車
+協會人員：夏宗瑜
+信箱：zoey.xia@mail.isha.org.tw
+isha.khh.owner@gmail.com
+
+廠商：奇菱科技
+聯繫人：蘇麗錦 課長 06-5890818 ext.17475
+時間：1330-1700
+地址：臺南市新市區豐華里王甲路1號
+交通：開車
+協會人員：夏宗瑜
+信箱：zoey.xia@mail.isha.org.tw
+isha.khh.owner@gmail.com`
+
+func TestParseStops_MultiVendorSample(t *testing.T) {
+	stops := ParseStops(multiVendorSample)
+	if len(stops) != 2 {
+		t.Fatalf("want 2 stops, got %d: %+v", len(stops), stops)
+	}
+	want := []struct{ vendor, loc, time string }{
+		{"台灣瑞環", "臺南市柳營區大農里環園西路二段19號", "0900-1200"},
+		{"奇菱科技", "臺南市新市區豐華里王甲路1號", "1330-1700"},
+	}
+	for i, w := range want {
+		s := stops[i]
+		if s.Vendor != w.vendor || s.Location != w.loc || s.Time != w.time || s.Transport != "開車" {
+			t.Errorf("stop %d: %+v", i, s)
+		}
+		if strings.Join(s.Names, ",") != "夏宗瑜" || strings.Join(s.Emails, ",") != "zoey.xia@mail.isha.org.tw,isha.khh.owner@gmail.com" {
+			t.Errorf("stop %d people: names %v emails %v", i, s.Names, s.Emails)
+		}
+		if m := s.Missing(); len(m) != 0 || s.PairingProblem() {
+			t.Errorf("stop %d should be complete: missing %v pairing %v", i, m, s.PairingProblem())
+		}
+		if !LocationMatches(s.Location, DefaultTargetCounties) {
+			t.Errorf("stop %d (臺南) should be a target", i)
+		}
+	}
+}
+
+func TestParseStops_ParsesGoogleHTMLToo(t *testing.T) {
+	html := strings.ReplaceAll(multiVendorSample, "\n", "<br>")
+	a, b := ParseStops(html), ParseStops(multiVendorSample)
+	if len(a) != 2 || a[1].Vendor != b[1].Vendor || strings.Join(a[1].Emails, ",") != strings.Join(b[1].Emails, ",") {
+		t.Errorf("%+v vs %+v", a, b)
+	}
+}
+
+func TestParseStops_OneStopMissingAFieldIsReportedOnThatStop(t *testing.T) {
+	stops := ParseStops(strings.Replace(multiVendorSample, "交通：開車\n協會人員：夏宗瑜\n信箱：zoey.xia@mail.isha.org.tw\nisha.khh.owner@gmail.com", "協會人員：夏宗瑜\n信箱：zoey.xia@mail.isha.org.tw", 1)) // only the first block is changed
+	if len(stops[0].Missing()) != 1 || stops[0].Missing()[0] != "交通" || len(stops[1].Missing()) != 0 {
+		t.Errorf("%v / %v", stops[0].Missing(), stops[1].Missing())
+	}
+}
+
+func TestParseStops_WithoutVendorLinesIsOneStopAsBefore(t *testing.T) {
+	stops := ParseStops(agreedFormat)
+	if len(stops) != 1 || stops[0].Vendor != "" || stops[0].Location != ParseDescription(agreedFormat).Location {
+		t.Errorf("%+v", stops)
+	}
+	// 地址 is only the destination inside vendor blocks.
+	if st := ParseStops("地址:嘉義縣民雄鄉\n時間:1:30"); st[0].Location != "" {
+		t.Errorf("plain description: 地址 must not be taken as 地點: %+v", st)
+	}
+}
+
+func TestMailboxContinuationLines(t *testing.T) {
+	tr := ParseDescription("信箱：a@x.org\nb@x.org、c@x.org\n\nd@x.org")
+	if strings.Join(tr.Emails, ",") != "a@x.org,b@x.org,c@x.org" {
+		t.Errorf("a blank line ends the continuation: %v", tr.Emails)
+	}
+	tr = ParseDescription("信箱：a@x.org\n時間：09:00\nb@x.org")
+	if strings.Join(tr.Emails, ",") != "a@x.org" {
+		t.Errorf("another label ends it: %v", tr.Emails)
+	}
+	tr = ParseDescription("信箱：a@x.org\n備註一些文字\nb@x.org")
+	if strings.Join(tr.Emails, ",") != "a@x.org" {
+		t.Errorf("a line without a mailbox ends it: %v", tr.Emails)
+	}
+	// the second 信箱 label (an itinerary reusing the word) must not be extended either
+	tr = ParseDescription("信箱：a@x.org\n信箱：z@x.org\nq@x.org")
+	if strings.Join(tr.Emails, ",") != "a@x.org" {
+		t.Errorf("first label wins and only it continues: %v", tr.Emails)
+	}
+}
+
+func TestEvaluate_ExtraMailboxesDoNotCauseNameNoise(t *testing.T) {
+	// 1 name, 2 mailboxes (the second is a mailbox the directory doesn't have).
+	tr := ParseStops(multiVendorSample)[0]
+	users := []User{{SamAccountName: "zoey.xia", DisplayName: "26安環處-高雄-夏宗瑜", Mail: "zoey.xia@mail.isha.org.tw", HasDriverLicense: bp(true), HasOwnCar: bp(false)}}
+	res := Evaluate(tr, users, DefaultTargetCounties)
+	if len(res.Candidates) != 2 {
+		t.Fatalf("one person plus the unknown mailbox, nothing else: %+v", res.Candidates)
+	}
+	if c := res.Candidates[0]; c.Decision != Notify || c.User.SamAccountName != "zoey.xia" {
+		t.Errorf("%+v", c)
+	}
+	if c := res.Candidates[1]; c.Decision != Unmatched || c.Email != "isha.khh.owner@gmail.com" || c.Name != "" {
+		t.Errorf("the extra mailbox is reported as not found, unlabelled: %+v", c)
 	}
 }

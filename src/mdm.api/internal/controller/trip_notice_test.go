@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -394,7 +395,7 @@ func TestSend_OnlyMailsEventsInTheMandatoryFormat(t *testing.T) {
 	}
 	want := map[string]string{
 		"no-time": "時間", "no-transport": "交通", "no-mail": "信箱",
-		"placeholders": "時間,交通,信箱", "no-names": "協會人員", "unpaired": "人員與信箱數量不一致",
+		"placeholders": "時間,交通,信箱", "no-names": "協會人員", "unpaired": "有人員沒有對應的信箱",
 	}
 	if len(missing) != len(want) {
 		t.Errorf("incomplete: %v", missing)
@@ -476,4 +477,152 @@ func TestSend_RealAgreedSampleEndToEnd(t *testing.T) {
 
 func tripcarUser(account, display, mail string, license, car *bool) tripcar.User {
 	return tripcar.User{SamAccountName: account, DisplayName: display, Mail: mail, HasDriverLicense: license, HasOwnCar: car}
+}
+
+// ---- multi-vendor events: one "廠商：" block per stop ----
+
+const vendorBlock = `廠商：%s
+聯繫人：某某 課長 06-0000000
+時間：%s
+地址：%s
+交通：開車
+協會人員：%s
+信箱：%s`
+
+func vendor(name, time, addr, names, mails string) string {
+	return fmt.Sprintf(vendorBlock, name, time, addr, names, mails)
+}
+
+const (
+	tainan1 = "臺南市柳營區大農里環園西路二段19號"
+	tainan2 = "臺南市新市區豐華里王甲路1號"
+	zoeyBox = "zoey.xia@mail.isha.org.tw"
+	testBox = "isha.khh.owner@gmail.com"
+)
+
+// multiEnv: today is Oct 23 (Taipei), so a trip on Oct 29 is 6 days away.
+func multiEnv(t *testing.T, desc string) (*env, *fakeNotices, *fakeMailer) {
+	t.Helper()
+	e, n, m := noticeEnv(t)
+	e.now = time.Date(2026, 10, 23, 1, 0, 0, 0, time.UTC)
+	e.g.events["bip@group"] = nil
+	e.g.events["ida@group"] = []google.Event{{ID: "mv", Summary: "[深入輔導]台灣瑞環、奇菱科技(宗瑜)", Start: "2026-10-29", AllDay: true, Description: desc}}
+	return e, n, m
+}
+
+func TestMultiVendor_OnePersonOneMailListingEveryStop(t *testing.T) {
+	desc := vendor("台灣瑞環", "0900-1200", tainan1, "夏宗瑜", zoeyBox+"\n"+testBox) + "\n\n" +
+		vendor("奇菱科技", "1330-1700", tainan2, "夏宗瑜", zoeyBox+"\n"+testBox)
+	e, notices, mailer := multiEnv(t, desc)
+
+	_, prev := previewWithDirectory(t, e)
+	ev := prev.event("mv")
+	if !ev.Target || len(ev.FormatMissing) != 0 || !ev.NoticeDue || ev.DaysUntil != 6 {
+		t.Fatalf("event: %+v", ev)
+	}
+	if len(ev.Candidates) != 2 {
+		t.Fatalf("a person on two stops is one candidate, plus the test mailbox: %+v", ev.Candidates)
+	}
+	if c := ev.Candidates[0]; c.Email != zoeyBox || c.Decision != "notify" || fmt.Sprint(c.Stops) != "[0 1]" {
+		t.Errorf("zoey: %+v", c)
+	}
+	if c := ev.Candidates[1]; c.Email != testBox || c.Decision != "unmatched" {
+		t.Errorf("the test mailbox isn't in the directory: %+v", c)
+	}
+
+	code, out, raw := postSend(t, e, "")
+	if code != 200 || out.Counts["sent"] != 1 || len(mailer.sent) != 1 || len(notices.rows) != 1 {
+		t.Fatalf("%d %s sent=%d", code, raw, len(mailer.sent))
+	}
+	m := mailer.sent[0]
+	if m.to != zoeyBox {
+		t.Errorf("sent to %q", m.to)
+	}
+	for _, want := range []string{"台灣瑞環", "奇菱科技", "柳營區大農里", "新市區豐華里", "0900-1200", "1330-1700", "2026-10-29"} {
+		if !strings.Contains(m.body, want) {
+			t.Errorf("mail lacks %q", want)
+		}
+	}
+	if strings.Count(m.body, "<strong>地點</strong>") != 2 || strings.Contains(m.subject, "柳營區") {
+		t.Errorf("one table per stop, subject names the trip: %q", m.subject)
+	}
+	if strings.Contains(strings.Join(mailer.recipients(), ","), "gmail") {
+		t.Error("the mailbox the directory doesn't know must not be mailed")
+	}
+
+	// again: nothing
+	if _, again, _ := postSend(t, e, ""); again.Counts["sent"] != 0 || len(mailer.sent) != 1 {
+		t.Errorf("second press: %+v", again.Counts)
+	}
+}
+
+func TestMultiVendor_EachPersonGetsOnlyTheirOwnStops(t *testing.T) {
+	desc := vendor("台灣瑞環", "0900-1200", tainan1, "夏宗瑜", zoeyBox) + "\n\n" +
+		vendor("奇菱科技", "1330-1700", tainan2, "羅羿昇", "yishengluo1006@mail.isha.org.tw")
+	e, _, mailer := multiEnv(t, desc)
+	postSend(t, e, "")
+	if len(mailer.sent) != 2 {
+		t.Fatalf("two people, two mails: %v", mailer.recipients())
+	}
+	for _, m := range mailer.sent {
+		switch m.to {
+		case zoeyBox:
+			// (the event title names both vendors, so tell the stops apart by address)
+			if !strings.Contains(m.body, "柳營區") || strings.Contains(m.body, "新市區") {
+				t.Errorf("zoey should only see her stop")
+			}
+		default:
+			if !strings.Contains(m.body, "新市區") || strings.Contains(m.body, "柳營區") {
+				t.Errorf("羅羿昇 should only see his stop")
+			}
+		}
+	}
+}
+
+func TestMultiVendor_OnlyTargetStopsAreInTheMail(t *testing.T) {
+	desc := vendor("台中廠", "0900-1000", "台中市西屯區某路1號", "夏宗瑜", zoeyBox) + "\n\n" +
+		vendor("奇菱科技", "1330-1700", tainan2, "夏宗瑜", zoeyBox)
+	e, _, mailer := multiEnv(t, desc)
+	postSend(t, e, "")
+	if len(mailer.sent) != 1 || !strings.Contains(mailer.sent[0].body, "新市區") || strings.Contains(mailer.sent[0].body, "台中廠") {
+		t.Errorf("the Taichung stop needs no rental car: %+v", mailer.sent)
+	}
+}
+
+func TestMultiVendor_NoTargetStopMeansNoNotice(t *testing.T) {
+	desc := vendor("台中廠", "0900-1000", "台中市西屯區某路1號", "夏宗瑜", zoeyBox)
+	e, _, mailer := multiEnv(t, desc)
+	_, prev := previewWithDirectory(t, e)
+	if ev := prev.event("mv"); ev.Target || len(ev.Candidates) != 0 {
+		t.Errorf("%+v", ev)
+	}
+	postSend(t, e, "")
+	if len(mailer.sent) != 0 {
+		t.Error("nothing to send")
+	}
+}
+
+func TestMultiVendor_OneIncompleteBlockHoldsBackTheWholeEvent(t *testing.T) {
+	second := strings.Replace(vendor("奇菱科技", "1330-1700", tainan2, "夏宗瑜", zoeyBox), "交通：開車\n", "", 1)
+	desc := vendor("台灣瑞環", "0900-1200", tainan1, "夏宗瑜", zoeyBox) + "\n\n" + second
+	e, notices, mailer := multiEnv(t, desc)
+
+	_, prev := previewWithDirectory(t, e)
+	if ev := prev.event("mv"); len(ev.FormatMissing) != 1 || ev.FormatMissing[0] != "奇菱科技：缺 交通" {
+		t.Errorf("format problems should name the vendor: %v", ev.FormatMissing)
+	}
+	_, out, _ := postSend(t, e, "")
+	if len(mailer.sent) != 0 || len(notices.rows) != 0 || len(out.Incomplete) != 1 {
+		t.Errorf("sent=%d incomplete=%+v", len(mailer.sent), out.Incomplete)
+	}
+}
+
+func TestMultiVendor_ExtraTestMailboxDoesNotBlockSending(t *testing.T) {
+	// 1 name, 2 mailboxes: fine — every mailbox identifies someone by itself.
+	desc := vendor("台灣瑞環", "0900-1200", tainan1, "夏宗瑜", zoeyBox+"\n"+testBox)
+	e, _, mailer := multiEnv(t, desc)
+	_, out, _ := postSend(t, e, "")
+	if len(out.Incomplete) != 0 || len(mailer.sent) != 1 {
+		t.Errorf("incomplete=%+v sent=%d", out.Incomplete, len(mailer.sent))
+	}
 }

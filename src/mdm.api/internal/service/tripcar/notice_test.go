@@ -11,7 +11,7 @@ func TestRenderNotice_ContentAndOptionalRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if subj != "[MDM] 出差借車提醒 — 2026-10-27 出發（臺南分局）" {
+	if subj != "[MDM] 出差借車提醒 — 2026-10-27 出發：76工危品進廠(臺南分局)" {
 		t.Errorf("subject: %q", subj)
 	}
 	for _, want := range []string{"羅羿昇 您好", "2026-10-27", "7 天後", "76工危品進廠(臺南分局)", "臺南分局"} {
@@ -48,6 +48,37 @@ func TestRenderNotice_CalendarTextCannotInjectMarkupOrHeaders(t *testing.T) {
 	}
 	if !strings.Contains(body, "&lt;script&gt;") {
 		t.Error("the text should still be there, escaped")
+	}
+}
+
+func TestRenderNotice_SeveralStopsInOneMail(t *testing.T) {
+	subj, body, err := RenderNotice(NoticeData{
+		Recipient: "夏宗瑜", Summary: "[深入輔導]台灣瑞環、奇菱科技(宗瑜)", Start: "2026-10-29", DaysUntil: 7,
+		Stops: []NoticeStop{
+			{Vendor: "台灣瑞環", Location: "臺南市柳營區大農里環園西路二段19號", Time: "0900-1200", Transport: "開車"},
+			{Vendor: "奇菱科技", Location: "臺南市新市區豐華里王甲路1號", Time: "1330-1700", Transport: "開車"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(subj, "2026-10-29") || !strings.Contains(subj, "台灣瑞環") || strings.Contains(subj, "柳營區") {
+		t.Errorf("subject names the trip, not its addresses: %q", subj)
+	}
+	for _, want := range []string{"台灣瑞環", "奇菱科技", "柳營區大農里", "新市區豐華里", "0900-1200", "1330-1700"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body lacks %q", want)
+		}
+	}
+	if strings.Count(body, "<strong>地點</strong>") != 2 {
+		t.Error("one table per stop")
+	}
+}
+
+func TestNoticeSubject_LongTitleIsCut(t *testing.T) {
+	long := strings.Repeat("很長的標題", 30)
+	if s := NoticeSubject(NoticeData{Summary: long, Start: "2026-10-29"}); len([]rune(s)) > 80 {
+		t.Errorf("subject too long: %d", len([]rune(s)))
 	}
 }
 
