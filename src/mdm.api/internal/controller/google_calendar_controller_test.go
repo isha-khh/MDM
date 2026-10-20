@@ -985,6 +985,7 @@ type candJSON struct {
 	HasOwnCar                      *bool  `json:"has_own_car"`
 	NoticeStatus                   string `json:"notice_status"`
 	NoticeSentAt                   string `json:"notice_sent_at"`
+	Stops                          []int  `json:"stops"`
 }
 
 type previewWithCandidates struct {

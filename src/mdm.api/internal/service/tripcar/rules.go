@@ -133,6 +133,9 @@ func Evaluate(t Trip, users []User, targets []string) Result {
 	// same name are told apart by their mailboxes, and a mailbox the directory
 	// doesn't know is reported as not found rather than guessed from the name.
 	paired := len(t.Names) > 0 && len(t.Names) == len(t.Emails)
+	// With at least as many mailboxes as names, every person is identified by a
+	// mailbox and names are never looked up on their own.
+	byMailOnly := len(t.Emails) > 0 && len(t.Names) <= len(t.Emails)
 
 	for i, email := range t.Emails {
 		name := ""
@@ -152,7 +155,7 @@ func Evaluate(t Trip, users []User, targets []string) Result {
 	}
 
 	for _, name := range t.Names {
-		if paired {
+		if byMailOnly {
 			break
 		}
 		matches := findByName(users, name)
@@ -180,12 +183,13 @@ func Evaluate(t Trip, users []User, targets []string) Result {
 	return res
 }
 
-// PairingProblem reports a names list and a mailbox list that can't be read
-// as pairs (both present, different lengths). Mailboxes are what tell two
-// people of the same name apart, so which name goes with which mailbox must
-// not be guessed.
+// PairingProblem reports people listed without a mailbox of their own: more
+// names than mailboxes (and at least one mailbox). Mailboxes are what identify
+// a person — it is how two people of the same name are told apart — so a name
+// with no mailbox can't be trusted. Extra mailboxes, on the other hand, are
+// harmless: each one identifies someone by itself.
 func (t Trip) PairingProblem() bool {
-	return len(t.Names) > 0 && len(t.Emails) > 0 && len(t.Names) != len(t.Emails)
+	return len(t.Emails) > 0 && len(t.Names) > len(t.Emails)
 }
 
 // PriorityRank orders people for rental-car approval: those without a car of

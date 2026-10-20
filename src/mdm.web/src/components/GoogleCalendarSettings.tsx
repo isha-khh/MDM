@@ -17,6 +17,15 @@ interface GoogleCalendarStatus {
   updated_at?: string;
 }
 
+interface TripStop {
+  vendor?: string;
+  location: string;
+  time: string;
+  transport: string;
+  names: string[];
+  emails: string[];
+}
+
 interface PreviewEvent {
   id: string;
   summary: string;
@@ -30,6 +39,8 @@ interface PreviewEvent {
   calendar_id: string;
   calendar_summary: string;
   trip: { location: string; time: string; transport: string; names: string[]; emails: string[] };
+  // Set when the description has one "廠商：" block per stop.
+  stops?: TripStop[];
   location_used: string;
   location_source: "description" | "event" | "title" | "";
   target_location: boolean;
@@ -51,6 +62,7 @@ interface Candidate {
   has_driver_license: boolean | null;
   has_own_car: boolean | null;
   priority: number;
+  stops?: number[];
   notice_status?: "sent" | "failed" | "pending";
   notice_sent_at?: string;
   notice_error?: string;
@@ -516,6 +528,18 @@ export function GoogleCalendarSettings() {
                               <span className="text-xs opacity-50 ml-auto">{ev.calendar_summary}</span>
                             </summary>
                             <div className="p-3 border-t border-base-300 text-xs space-y-2">
+                              {ev.stops && ev.stops.length > 0 && (
+                                <div className="space-y-1">
+                                  <div className="opacity-60">各廠商行程（{ev.stops.length} 段）</div>
+                                  {ev.stops.map((st, i) => (
+                                    <div key={i} className="rounded border border-base-300 p-2">
+                                      <div className="font-medium">{i + 1}. {st.vendor || "（未填廠商）"}</div>
+                                      <div className="opacity-80 break-all">{st.location || "（沒有地址）"}</div>
+                                      <div className="opacity-60">{st.time || "—"}／{st.transport || "—"}／{st.names.join("、") || "—"}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
                               <dl className="grid grid-cols-[5rem_1fr] gap-x-2 gap-y-1">
                                 <dt className="opacity-60">判斷地點</dt>
                                 <dd>{ev.location_used || "—"}{ev.location_source && <span className="opacity-50">（來自{LOCATION_SOURCE_LABELS[ev.location_source] ?? ev.location_source}）</span>}</dd>
@@ -549,6 +573,9 @@ export function GoogleCalendarSettings() {
                                                   <td>
                                                     <div>{c.name || c.display_name || c.email}</div>
                                                     {c.email && <div className="opacity-50 break-all">{c.email}</div>}
+                                                    {ev.stops && c.stops && c.stops.length > 0 && (
+                                                      <div className="opacity-50">{c.stops.map((i) => ev.stops?.[i]?.vendor || `第 ${i + 1} 段`).join("、")}</div>
+                                                    )}
                                                   </td>
                                                   <td><span className={`badge badge-sm ${DECISION_BADGE[c.decision].cls}`}>{DECISION_BADGE[c.decision].label}</span></td>
                                                   <td>{c.decision === "unmatched" ? "—" : triLabel(c.has_driver_license, "有", "無")}</td>

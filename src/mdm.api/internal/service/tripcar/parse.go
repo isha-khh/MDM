@@ -20,6 +20,9 @@ import (
 //	協會人員：張啓瑞 、劉名政
 //	信箱：a@x.org、b@x.org
 type Trip struct {
+	// Vendor names the company visited when the description holds several
+	// "廠商：…" blocks, one per stop; empty for a plain single-block event.
+	Vendor    string   `json:"vendor,omitempty"`
 	Location  string   `json:"location"`
 	Time      string   `json:"time"`
 	Transport string   `json:"transport"`
@@ -97,13 +100,42 @@ var attendeeLabels = map[string]bool{"協會人員": true, "進廠人員": true}
 // attendee line are collected, de-duplicated, with role notes like "(管考)"
 // removed.
 func ParseDescription(desc string) Trip {
+	return parseLines(strings.Split(stripHTML(desc), "\n"), false)
+}
+
+// parseLines reads one block of "標籤：內容" lines.
+//
+// Besides the labelled lines, an unlabelled line directly under 信箱 that
+// holds mailboxes is a continuation of it (Google shows a second mailbox on
+// its own line); a blank line or any other label ends the continuation.
+//
+// With addressIsLocation, 地址 counts as the destination too (the multi-vendor
+// template has 地址 where the plain one has 地點); whichever comes first wins.
+// It is off for plain descriptions, where "地址:" lines are usually stops in an
+// itinerary rather than the trip's own destination.
+func parseLines(lines []string, addressIsLocation bool) Trip {
 	var t Trip
 	seen := map[string]bool{}
 	names := map[string]bool{}
-	for _, line := range strings.Split(stripHTML(desc), "\n") {
-		key, val, ok := splitLabel(strings.TrimSpace(line))
+	inMail := false // the previous line was the accepted 信箱 line
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		key, val, ok := splitLabel(line)
 		if !ok {
+			if inMail && strings.Contains(line, "@") {
+				for _, m := range splitList(line) {
+					if strings.Contains(m, "@") {
+						t.Emails = append(t.Emails, m)
+					}
+				}
+			} else {
+				inMail = false
+			}
 			continue
+		}
+		inMail = false
+		if addressIsLocation && key == "地址" {
+			key = "地點"
 		}
 		if attendeeLabels[key] {
 			for _, n := range splitList(val) {
@@ -129,12 +161,42 @@ func ParseDescription(desc string) Trip {
 			t.Transport = val
 		case "信箱":
 			t.Emails = splitList(val)
+			inMail = true
+		case "廠商":
+			t.Vendor = val
 		default:
 			continue
 		}
 		seen[key] = true
 	}
 	return t
+}
+
+// ParseStops splits a description into its stops. A description with
+// "廠商：" lines has one block per vendor (each running to the next 廠商 line),
+// every block with its own 地址／時間／交通／協會人員／信箱; anything before the
+// first 廠商 line is not part of a stop. Without 廠商 lines the whole
+// description is a single stop, read exactly like ParseDescription.
+func ParseStops(desc string) []Trip {
+	lines := strings.Split(stripHTML(desc), "\n")
+	var starts []int
+	for i, l := range lines {
+		if k, _, ok := splitLabel(strings.TrimSpace(l)); ok && k == "廠商" {
+			starts = append(starts, i)
+		}
+	}
+	if len(starts) == 0 {
+		return []Trip{parseLines(lines, false)}
+	}
+	stops := make([]Trip, 0, len(starts))
+	for n, from := range starts {
+		to := len(lines)
+		if n+1 < len(starts) {
+			to = starts[n+1]
+		}
+		stops = append(stops, parseLines(lines[from:to], true))
+	}
+	return stops
 }
 
 // RequiredFields are the labels every business-trip event must fill in, in the

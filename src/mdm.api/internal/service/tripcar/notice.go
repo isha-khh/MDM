@@ -8,7 +8,16 @@ import (
 	"time"
 )
 
-// NoticeData is what the rental-car notice mail says.
+// NoticeStop is one place the person is going on the trip.
+type NoticeStop struct {
+	Vendor    string
+	Location  string
+	Time      string
+	Transport string
+}
+
+// NoticeData is what the rental-car notice mail says. One mail per person
+// per trip: a trip with several stops lists every stop the person is on.
 type NoticeData struct {
 	Recipient string // how the person is addressed (directory display name or the name in the event)
 	Summary   string // event title
@@ -16,13 +25,23 @@ type NoticeData struct {
 	Start     string // "2026-10-27" or "2026-10-27 08:00"
 	Time      string // free-text 時間 line from the description, optional
 	Transport string // free-text 交通 line, optional
+	// Stops, when set, replace Location/Time/Transport: one table per stop.
+	Stops     []NoticeStop
 	DaysUntil int
 }
 
 // NoticeSubject keeps the date in the subject so a person with several trips
-// can tell the mails apart.
+// can tell the mails apart, and names the trip by its title (destinations can
+// be long addresses).
 func NoticeSubject(d NoticeData) string {
-	return fmt.Sprintf("[MDM] 出差借車提醒 — %s 出發（%s）", d.Start, oneLine(d.Location))
+	what := oneLine(d.Summary)
+	if what == "" {
+		what = oneLine(d.Location)
+	}
+	if r := []rune(what); len(r) > 50 {
+		what = string(r[:50]) + "…"
+	}
+	return fmt.Sprintf("[MDM] 出差借車提醒 — %s 出發：%s", d.Start, what)
 }
 
 // oneLine collapses line breaks: subjects must never carry a newline, and a
@@ -41,11 +60,16 @@ var noticeTmpl = template.Must(template.New("notice").Parse(`<!DOCTYPE html>
   <p>您預計於 <strong>{{.Start}}</strong>（{{.DaysUntil}} 天後）出差，行程如下。目的地需要開車，若您需要租借公務車，請盡早到 MDM 平台提出借車申請。</p>
   <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
     <tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9; width: 120px;"><strong>行程</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{.Summary}}</td></tr>
-    <tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>地點</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{.Location}}</td></tr>
     <tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>出發日</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{.Start}}</td></tr>
-    {{if .Time}}<tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>時間</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{.Time}}</td></tr>{{end}}
-    {{if .Transport}}<tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>交通</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{.Transport}}</td></tr>{{end}}
   </table>
+  {{range $i, $s := .Stops}}
+  <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
+    {{if $s.Vendor}}<tr><td style="padding: 8px; border: 1px solid #ddd; background: #e3f2fd; width: 120px;"><strong>廠商</strong></td><td style="padding: 8px; border: 1px solid #ddd; background: #e3f2fd;"><strong>{{$s.Vendor}}</strong></td></tr>{{end}}
+    <tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9; width: 120px;"><strong>地點</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{$s.Location}}</td></tr>
+    {{if $s.Time}}<tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>時間</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{$s.Time}}</td></tr>{{end}}
+    {{if $s.Transport}}<tr><td style="padding: 8px; border: 1px solid #ddd; background: #f9f9f9;"><strong>交通</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{{$s.Transport}}</td></tr>{{end}}
+  </table>
+  {{end}}
   <p>若行程已有安排或不需要借車，請忽略此信。</p>
   <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
   <p style="color: #999; font-size: 12px;">此信件由 MDM 管理平台自動發送，請勿直接回覆。</p>
@@ -58,6 +82,14 @@ var noticeTmpl = template.Must(template.New("notice").Parse(`<!DOCTYPE html>
 func RenderNotice(d NoticeData) (subject, body string, err error) {
 	d.Summary, d.Location, d.Time, d.Transport = oneLine(d.Summary), oneLine(d.Location), oneLine(d.Time), oneLine(d.Transport)
 	d.Recipient = oneLine(d.Recipient)
+	if len(d.Stops) == 0 {
+		d.Stops = []NoticeStop{{Location: d.Location, Time: d.Time, Transport: d.Transport}}
+	}
+	stops := make([]NoticeStop, len(d.Stops))
+	for i, st := range d.Stops {
+		stops[i] = NoticeStop{Vendor: oneLine(st.Vendor), Location: oneLine(st.Location), Time: oneLine(st.Time), Transport: oneLine(st.Transport)}
+	}
+	d.Stops = stops
 	var buf bytes.Buffer
 	if err := noticeTmpl.Execute(&buf, d); err != nil {
 		return "", "", err
