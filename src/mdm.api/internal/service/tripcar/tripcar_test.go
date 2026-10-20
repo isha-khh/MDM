@@ -255,3 +255,96 @@ func TestDueForNotice_UsesLocalCalendarDay(t *testing.T) {
 		t.Error("should be due: it is already Oct 13 in Taipei")
 	}
 }
+
+// Factory-visit events ("76工危品進廠(…分局)") are laid out differently from
+// the 地點/信箱 template. These are real descriptions with company names
+// replaced.
+func TestParseDescription_FactoryVisitStyle(t *testing.T) {
+	cases := []struct {
+		name string
+		desc string
+		want []string
+	}{
+		{
+			"single label, html table itinerary",
+			`進廠人員:羅羿昇<br><br><table dir="ltr"><tbody><tr><td><br>10/27 屏南<br>10:30-12:00公司A</td></tr><tr><td>14:00-15:30公司B屏南廠</td></tr></tbody></table>`,
+			[]string{"羅羿昇"},
+		},
+		{
+			"several labelled lines, role notes stripped, plain text",
+			"進廠人員:夏宗瑜(管考)\n\n10:00-11:30\n公司A\n\n進廠人員:郭人銓（管考）\n13:00-14:30\n公司B\n\n15:10-16:30 羅羿昇\n公司C",
+			[]string{"夏宗瑜", "郭人銓"}, // the unlabelled inline name is not picked up
+		},
+		{
+			"same person listed twice",
+			"進廠人員:陳小明\n10:30-12:00 公司A<br>進廠人員:陳小明",
+			[]string{"陳小明"},
+		},
+		{
+			"several people on one line",
+			"進廠人員:甲、乙 丙",
+			[]string{"甲", "乙", "丙"},
+		},
+		{
+			"no attendee line at all",
+			"05 2211526#216-許課長\n地址:嘉義縣民雄鄉興南村工業一路10號\n時間:1:30~3:30\n出席:卓技師",
+			nil,
+		},
+	}
+	for _, c := range cases {
+		got := ParseDescription(c.desc).Names
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: names %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestParseDescription_TimeRangesAndAddressLinesAreNotLabels(t *testing.T) {
+	// "10:30-12:00公司" and "地址:…" contain colons but are not trip labels.
+	got := ParseDescription("10/27 屏南\n10:30-12:00聯友金屬\n地址:嘉義縣民雄鄉\n時間:1:30~3:30")
+	if got.Location != "" || got.Transport != "" || len(got.Emails) != 0 {
+		t.Errorf("only known labels count: %+v", got)
+	}
+	if got.Time != "1:30~3:30" { // a real "時間:" label is kept
+		t.Errorf("time: %q", got.Time)
+	}
+}
+
+func TestLocationFromTitle(t *testing.T) {
+	cases := map[string]string{
+		"76工危品進廠(臺南分局)":      "臺南分局",
+		"76工危品進廠(高屏分局)":      "高屏分局",
+		"76工危品進廠（臺中分局）":      "臺中分局",
+		"[72FTIS]公司A(張三、李四)": "張三、李四",
+		"上評第二次輔導":            "",
+		"A(甲)B（乙）":           "甲、乙",
+		"空括號()":              "",
+		"":                   "",
+	}
+	for title, want := range cases {
+		if got := LocationFromTitle(title); got != want {
+			t.Errorf("LocationFromTitle(%q) = %q, want %q", title, got, want)
+		}
+	}
+}
+
+func TestLocationMatches_GaopingShorthand(t *testing.T) {
+	cases := []struct {
+		loc  string
+		want bool
+	}{
+		{"高屏分局", true}, // 高雄 + 屏東
+		{"臺南分局", true},
+		{"臺中分局", false},
+		{"嘉義", false},
+	}
+	for _, c := range cases {
+		if got := LocationMatches(c.loc, DefaultTargetCounties); got != c.want {
+			t.Errorf("LocationMatches(%q) = %v, want %v", c.loc, got, c.want)
+		}
+	}
+	// With only 台南 as a target, the shorthand must not match.
+	if LocationMatches("高屏分局", []string{"台南"}) {
+		t.Error("高屏 should expand to 高雄/屏東 only, not match an unrelated target")
+	}
+}

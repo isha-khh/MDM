@@ -676,9 +676,10 @@ type previewEvent struct {
 	CalendarSummary string       `json:"calendar_summary"`
 	Trip            tripcar.Trip `json:"trip"`
 	// LocationUsed is what the destination check looked at: the "地點："line in
-	// the description if there is one, otherwise the event's own location field.
+	// the description if there is one, then the event's own location field, then
+	// the bracketed part of the title (e.g. "…進廠(臺南分局)").
 	LocationUsed   string `json:"location_used"`
-	LocationSource string `json:"location_source"` // "description", "event" or ""
+	LocationSource string `json:"location_source"` // "description", "event", "title" or ""
 	TargetLocation bool   `json:"target_location"`
 	Truncated      bool   `json:"description_truncated,omitempty"`
 }
@@ -704,6 +705,10 @@ func buildPreviewEvent(cal google.Calendar, ev google.Event) previewEvent {
 		p.LocationUsed, p.LocationSource = trip.Location, "description"
 	case strings.TrimSpace(ev.Location) != "":
 		p.LocationUsed, p.LocationSource = strings.TrimSpace(ev.Location), "event"
+	default:
+		if t := tripcar.LocationFromTitle(ev.Summary); t != "" {
+			p.LocationUsed, p.LocationSource = t, "title"
+		}
 	}
 	p.TargetLocation = tripcar.LocationMatches(p.LocationUsed, tripcar.DefaultTargetCounties)
 	if r := []rune(p.Description); len(r) > maxDescriptionChars {

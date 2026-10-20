@@ -793,6 +793,8 @@ func previewEnv(t *testing.T) *env {
 			// no 地點 line, but the event's own location field names a target county
 			{ID: "e-loc", Summary: "台南會議", Start: "2026-10-21", AllDay: true, Location: "台南市中西區", Description: "只是備註，沒有標籤"},
 			{ID: "e-none", Summary: "內部會議", Start: "2026-10-25T10:00:00+08:00"},
+			// factory-visit style: destination only in the title's brackets, attendee line without emails
+			{ID: "e-visit", Summary: "76工危品進廠(高屏分局)", Start: "2026-10-26", AllDay: true, Description: "進廠人員:羅羿昇\n10:30-12:00 公司A"},
 		},
 	}
 	return e
@@ -808,7 +810,7 @@ func TestPreview_ParsesEventsAndFlagsTargets(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Days != 60 || len(out.Calendars) != 2 || len(out.Events) != 4 {
+	if out.Days != 60 || len(out.Calendars) != 2 || len(out.Events) != 5 {
 		t.Fatalf("days=%d calendars=%d events=%d", out.Days, len(out.Calendars), len(out.Events))
 	}
 	if out.Calendars[0].Summary != "ISHA高雄-園管局BIP計畫" || out.Calendars[0].Count != 2 {
@@ -822,7 +824,7 @@ func TestPreview_ParsesEventsAndFlagsTargets(t *testing.T) {
 		order = append(order, ev.ID)
 		byID[ev.ID] = i
 	}
-	if strings.Join(order, ",") != "e-loc,e-khh,e-none,e-miaoli" {
+	if strings.Join(order, ",") != "e-loc,e-khh,e-none,e-visit,e-miaoli" {
 		t.Errorf("order: %v", order)
 	}
 
@@ -838,6 +840,10 @@ func TestPreview_ParsesEventsAndFlagsTargets(t *testing.T) {
 	loc := out.Events[byID["e-loc"]]
 	if !loc.TargetLocation || loc.LocationSource != "event" || loc.LocationUsed != "台南市中西區" || loc.Trip.Names == nil {
 		t.Errorf("fallback to the event's location field: %+v", loc)
+	}
+	visit := out.Events[byID["e-visit"]]
+	if !visit.TargetLocation || visit.LocationSource != "title" || visit.LocationUsed != "高屏分局" || strings.Join(visit.Trip.Names, "|") != "羅羿昇" {
+		t.Errorf("factory-visit event: %+v", visit)
 	}
 	none := out.Events[byID["e-none"]]
 	if none.TargetLocation || none.LocationSource != "" || none.Trip.Emails == nil || none.Trip.Names == nil {
@@ -877,7 +883,7 @@ func TestPreview_OneCalendarFailingDoesNotHideTheOthers(t *testing.T) {
 	rec := do(e.mux, "GET", basePath+"/events", tokenFor(t, "admin", "sys_admin"), "", nil)
 	var out previewResp
 	json.Unmarshal(rec.Body.Bytes(), &out)
-	if rec.Code != 200 || out.Calendars[0].Error == "" || out.Calendars[1].Error != "" || len(out.Events) != 2 {
+	if rec.Code != 200 || out.Calendars[0].Error == "" || out.Calendars[1].Error != "" || len(out.Events) != 3 {
 		t.Errorf("status %d calendars %+v events %d", rec.Code, out.Calendars, len(out.Events))
 	}
 }

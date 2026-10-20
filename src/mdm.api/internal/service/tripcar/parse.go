@@ -50,6 +50,14 @@ func splitLabel(line string) (key, val string, ok bool) {
 	return strings.TrimSpace(line[:idx]), strings.TrimSpace(line[idx+width:]), true
 }
 
+// roleSuffixRe strips a trailing role note such as "(管考)" or "（管考）" from
+// a person's name.
+var roleSuffixRe = regexp.MustCompile(`[（(][^）)]*[）)]\s*$`)
+
+func cleanName(n string) string {
+	return strings.TrimSpace(roleSuffixRe.ReplaceAllString(strings.TrimSpace(n), ""))
+}
+
 func splitList(v string) []string {
 	parts := strings.FieldsFunc(v, func(r rune) bool {
 		switch r {
@@ -67,17 +75,40 @@ func splitList(v string) []string {
 	return out
 }
 
+// attendeeLabels name the lines that list who is going. 協會人員 is the
+// summary-block template; 進廠人員 is what the factory-visit events use, where
+// each person may have their own line.
+var attendeeLabels = map[string]bool{"協會人員": true, "進廠人員": true}
+
 // ParseDescription extracts the known "標籤：內容" lines. Unknown lines and
 // lines without a label are ignored; a missing label just leaves its field
-// empty. The first occurrence of a label wins: the summary block sits at the
-// top and an itinerary below it may reuse words like 地點 or 時間 for a single
-// stop, which must not override the trip's own header.
+// empty.
+//
+// For 地點/時間/交通/信箱 the first occurrence wins: the summary block sits at
+// the top and an itinerary below it may reuse those words for a single
+// stop, which must not override the trip's own header. Attendee lines are the
+// exception — several 進廠人員 lines are normal — so names from every
+// attendee line are collected, de-duplicated, with role notes like "(管考)"
+// removed.
 func ParseDescription(desc string) Trip {
 	var t Trip
-	var seen = map[string]bool{}
+	seen := map[string]bool{}
+	names := map[string]bool{}
 	for _, line := range strings.Split(stripHTML(desc), "\n") {
 		key, val, ok := splitLabel(strings.TrimSpace(line))
-		if !ok || seen[key] {
+		if !ok {
+			continue
+		}
+		if attendeeLabels[key] {
+			for _, n := range splitList(val) {
+				if n = cleanName(n); n != "" && !names[n] {
+					names[n] = true
+					t.Names = append(t.Names, n)
+				}
+			}
+			continue
+		}
+		if seen[key] {
 			continue
 		}
 		switch key {
@@ -87,8 +118,6 @@ func ParseDescription(desc string) Trip {
 			t.Time = val
 		case "交通":
 			t.Transport = val
-		case "協會人員":
-			t.Names = splitList(val)
 		case "信箱":
 			t.Emails = splitList(val)
 		default:
@@ -97,4 +126,20 @@ func ParseDescription(desc string) Trip {
 		seen[key] = true
 	}
 	return t
+}
+
+var bracketRe = regexp.MustCompile(`[（(]([^）)]*)[）)]`)
+
+// LocationFromTitle returns the bracketed parts of an event title, e.g.
+// "76工危品進廠(臺南分局)" -> "臺南分局". Factory-visit events carry their
+// destination only there. Only the brackets are used, not the whole title, so
+// project names and company names in the title don't count as places.
+func LocationFromTitle(title string) string {
+	var parts []string
+	for _, m := range bracketRe.FindAllStringSubmatch(title, -1) {
+		if p := strings.TrimSpace(m[1]); p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, "、")
 }

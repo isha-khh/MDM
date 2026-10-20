@@ -50,7 +50,9 @@ type Result struct {
 
 // 台/臺 are used interchangeably in place names; compare on 台.
 func normalizePlace(s string) string {
-	return strings.ReplaceAll(s, "臺", "台")
+	s = strings.ReplaceAll(s, "臺", "台")
+	// 高屏 is the usual shorthand for Kaohsiung + Pingtung (e.g. "高屏分局").
+	return strings.ReplaceAll(s, "高屏", "高雄屏東")
 }
 
 // LocationMatches reports whether the location text mentions any target
