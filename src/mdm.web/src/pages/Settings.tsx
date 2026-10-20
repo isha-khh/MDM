@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 import { Mail, Inbox, Save, Send, PlugZap, KeyRound, ExternalLink } from "lucide-react";
 import apiClient from "../lib/apiClient";
 import { useDialog } from "../components/DialogProvider";
+import { GoogleCalendarSettings } from "../components/GoogleCalendarSettings";
+import { DirectorySettings } from "../components/DirectorySettings";
 
 interface MailSettings {
   smtp_enabled: boolean;
@@ -465,6 +467,10 @@ export function Settings() {
           </div>
         </div>
       </div>
+
+      {/* Business-trip rental-car notice: who has a license / car, and where the trips come from */}
+      <DirectorySettings />
+      <GoogleCalendarSettings />
     </div>
   );
 }

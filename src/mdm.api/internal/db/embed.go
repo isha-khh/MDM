@@ -103,3 +103,18 @@ var Migration033SQL string
 
 //go:embed migrations/034_rental_extensions.up.sql
 var Migration034SQL string
+
+//go:embed migrations/035_google_calendar_settings.up.sql
+var Migration035SQL string
+
+//go:embed migrations/036_google_calendar_oauth_flow.up.sql
+var Migration036SQL string
+
+//go:embed migrations/037_google_calendar_selected_calendars.up.sql
+var Migration037SQL string
+
+//go:embed migrations/038_directory_settings.up.sql
+var Migration038SQL string
+
+//go:embed migrations/039_trip_car_notices.up.sql
+var Migration039SQL string
