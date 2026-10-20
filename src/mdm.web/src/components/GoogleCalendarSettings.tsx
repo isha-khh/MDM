@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Calendar, Upload, Link2, Unlink, PlugZap, Trash2, AlertTriangle, CheckCircle2, Copy, Eye, Save, Send } from "lucide-react";
 import apiClient from "../lib/apiClient";
 import { useDialog } from "./DialogProvider";
+import { TripNoticeSchedule } from "./TripNoticeSchedule";
 
 interface GoogleCalendarStatus {
   encryption_ready: boolean;
@@ -585,6 +586,9 @@ export function GoogleCalendarSettings() {
                 </div>
               )}
             </section>
+
+            {/* Step 5 */}
+            {status.connected && <TripNoticeSchedule />}
           </div>
         )}
 

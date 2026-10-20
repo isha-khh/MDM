@@ -3,12 +3,14 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/anthropics/mdm-server/internal/adapter/google"
 	"github.com/anthropics/mdm-server/internal/domain"
 	"github.com/anthropics/mdm-server/internal/port"
 	"github.com/anthropics/mdm-server/internal/service/tripcar"
@@ -29,6 +31,16 @@ const maxNoticesPerRequest = 100
 func (c *GoogleCalendarController) WithNotices(repo port.TripCarNoticeRepository, mailer noticeMailer) *GoogleCalendarController {
 	c.notices, c.mailer = repo, mailer
 	return c
+}
+
+// noticeDay is the trip's start date in Taipei. The log is keyed on the date,
+// not the exact start time: nudging a meeting from 10:00 to 10:30 doesn't
+// notify anyone again, moving the trip to another day does.
+func noticeDay(ev google.Event) string {
+	if t, ok := eventStart(ev); ok {
+		return t.Format("2006-01-02")
+	}
+	return ev.Start
 }
 
 func noticeKey(calendarID, eventID, eventStart, email string) string {
@@ -57,7 +69,7 @@ func (c *GoogleCalendarController) annotateNotices(ctx context.Context, events [
 			if cand.Email == "" {
 				continue
 			}
-			if n, ok := byKey[noticeKey(ev.CalendarID, ev.ID, ev.Start, cand.Email)]; ok {
+			if n, ok := byKey[noticeKey(ev.CalendarID, ev.ID, noticeDay(ev.Event), cand.Email)]; ok {
 				cand.NoticeStatus, cand.NoticeError = n.Status, n.Error
 				if n.SentAt != nil {
 					cand.NoticeSentAt = n.SentAt.In(taipei).Format(time.RFC3339)
@@ -119,43 +131,72 @@ func (c *GoogleCalendarController) handleSendNotices(w http.ResponseWriter, r *h
 		writeError(w, http.StatusBadRequest, "calendar_id 與 event_id 要一起提供")
 		return
 	}
-	if c.notices == nil || c.mailer == nil {
-		writeError(w, http.StatusServiceUnavailable, "寄信功能未啟用")
-		return
-	}
-	if !c.mailer.Enabled() {
-		writeError(w, http.StatusConflict, "尚未設定郵件伺服器（SMTP），請先到「郵件」設定")
-		return
-	}
-
-	res, perr := c.loadPreview(r.Context(), tripcar.NoticeLeadDays+1)
+	rep, perr := c.SendDueNotices(r.Context(), claims.UserID, body.CalendarID, body.EventID)
 	if perr != nil {
 		writeError(w, perr.status, perr.msg)
 		return
 	}
+	writeJSON(w, rep)
+}
+
+// SendReport is the outcome of one sending pass.
+type SendReport struct {
+	Results    []noticeResult    `json:"results"`
+	Counts     map[string]int    `json:"counts"`
+	Truncated  bool              `json:"truncated"`
+	Incomplete []incompleteEvent `json:"incomplete"`
+	Calendars  []previewCalendar `json:"calendars"`
+}
+
+// Summary is a one-line account of the pass, for the schedule's "last run".
+func (r *SendReport) Summary() string {
+	s := fmt.Sprintf("寄出 %d 封、先前已通知 %d 位、失敗 %d 封", r.Counts["sent"], r.Counts["already_sent"], r.Counts["failed"])
+	if n := len(r.Incomplete); n > 0 {
+		s += fmt.Sprintf("、格式有問題未寄 %d 個活動", n)
+	}
+	if r.Truncated {
+		s += "（數量多，其餘留待下次）"
+	}
+	return s
+}
+
+// SendDueNotices mails every due, licensed attendee who hasn't been notified
+// yet. `by` is recorded in the log (an admin's id, or "system:schedule").
+// With calendarID/eventID set it only handles that event. The admin button and
+// the daily schedule both come through here, so they behave identically.
+func (c *GoogleCalendarController) SendDueNotices(ctx context.Context, by, calendarID, eventID string) (*SendReport, *previewError) {
+	if c.notices == nil || c.mailer == nil {
+		return nil, &previewError{http.StatusServiceUnavailable, "寄信功能未啟用"}
+	}
+	if !c.mailer.Enabled() {
+		return nil, &previewError{http.StatusConflict, "尚未設定郵件伺服器（SMTP），請先到「郵件」設定"}
+	}
+
+	res, perr := c.loadPreview(ctx, tripcar.NoticeLeadDays+1)
+	if perr != nil {
+		return nil, perr
+	}
 	// Never mail from a half-known picture: without the directory we can't tell
 	// who has a license, and a calendar that failed to read may hide events.
 	if cfg, _ := res.Directory["configured"].(bool); !cfg {
-		writeError(w, http.StatusConflict, "尚未設定人員目錄，無法確認誰有駕照")
-		return
+		return nil, &previewError{http.StatusConflict, "尚未設定人員目錄，無法確認誰有駕照"}
 	}
 	if msg, _ := res.Directory["error"].(string); msg != "" {
-		writeError(w, http.StatusBadGateway, "人員目錄讀取失敗："+msg)
-		return
+		return nil, &previewError{http.StatusBadGateway, "人員目錄讀取失敗：" + msg}
 	}
-	c.annotateNotices(r.Context(), res.Events, c.now())
+	c.annotateNotices(ctx, res.Events, c.now())
 
 	results := []noticeResult{}
 	incomplete := []incompleteEvent{}
 	matched, truncated := false, false
-	// Mark* run detached from the request: if the admin closes the page after
-	// the mail left, the log must still say "sent", or it would go out again
-	// once the pending claim expires.
-	bg := context.WithoutCancel(r.Context())
+	// Mark* run detached from the caller: if the admin closes the page (or the
+	// server is shutting down) after the mail left, the log must still say
+	// "sent", or it would go out again once the pending claim expires.
+	bg := context.WithoutCancel(ctx)
 loop:
 	for i := range res.Events {
 		ev := &res.Events[i]
-		if body.EventID != "" && (ev.CalendarID != body.CalendarID || ev.ID != body.EventID) {
+		if eventID != "" && (ev.CalendarID != calendarID || ev.ID != eventID) {
 			continue
 		}
 		matched = true
@@ -186,10 +227,10 @@ loop:
 				truncated = true
 				break loop
 			}
-			id, claimed, err := c.notices.Claim(r.Context(), &domain.TripCarNotice{
-				CalendarID: ev.CalendarID, EventID: ev.ID, EventStart: ev.Start, EventSummary: ev.Summary,
+			id, claimed, err := c.notices.Claim(ctx, &domain.TripCarNotice{
+				CalendarID: ev.CalendarID, EventID: ev.ID, EventStart: noticeDay(ev.Event), EventSummary: ev.Summary,
 				RecipientEmail: cand.Email, RecipientAccount: cand.Account,
-			}, claims.UserID)
+			}, by)
 			if err != nil {
 				log.Printf("[trip-notice] claim failed: %v", err)
 				out.Result, out.Error = "failed", "無法寫入通知紀錄"
@@ -208,7 +249,7 @@ loop:
 				DaysUntil: ev.DaysUntil,
 			})
 			if err == nil {
-				err = c.mailer.Send(r.Context(), cand.Email, subject, html)
+				err = c.mailer.Send(ctx, cand.Email, subject, html)
 			}
 			if err != nil {
 				reason := truncateRunes(err.Error(), 300)
@@ -226,17 +267,16 @@ loop:
 			results = append(results, out)
 		}
 	}
-	if body.EventID != "" && !matched {
-		writeError(w, http.StatusNotFound, "找不到這個活動（可能已不在近期範圍內）")
-		return
+	if eventID != "" && !matched {
+		return nil, &previewError{http.StatusNotFound, "找不到這個活動（可能已不在近期範圍內）"}
 	}
 
 	counts := map[string]int{"sent": 0, "already_sent": 0, "failed": 0}
 	for _, o := range results {
 		counts[o.Result]++
 	}
-	log.Printf("[trip-notice] send by user=%s sent=%d already=%d failed=%d", claims.UserID, counts["sent"], counts["already_sent"], counts["failed"])
-	writeJSON(w, map[string]interface{}{"results": results, "counts": counts, "truncated": truncated, "incomplete": incomplete, "calendars": res.Calendars})
+	log.Printf("[trip-notice] send by=%s sent=%d already=%d failed=%d incomplete=%d", by, counts["sent"], counts["already_sent"], counts["failed"], len(incomplete))
+	return &SendReport{Results: results, Counts: counts, Truncated: truncated, Incomplete: incomplete, Calendars: res.Calendars}, nil
 }
 
 func sentCount(rs []noticeResult) int {

@@ -149,3 +149,13 @@ type TripCarNotice struct {
 	Error            string
 	SentAt           *time.Time
 }
+
+// TripNoticeSchedule controls the daily automatic sending of trip notices.
+type TripNoticeSchedule struct {
+	Enabled        bool
+	SendHour       int    // Taipei hour of day, 0-23
+	LastRunDate    string // Taipei date of the last claimed run
+	LastRunAt      *time.Time
+	LastRunSummary string
+	UpdatedAt      time.Time
+}

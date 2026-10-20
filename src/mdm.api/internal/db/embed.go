@@ -118,3 +118,6 @@ var Migration038SQL string
 
 //go:embed migrations/039_trip_car_notices.up.sql
 var Migration039SQL string
+
+//go:embed migrations/040_trip_notice_schedule.up.sql
+var Migration040SQL string
