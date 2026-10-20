@@ -141,10 +141,10 @@ func (c *AppController) handleSyncVPPAssets(w http.ResponseWriter, r *http.Reque
 			// VPP asset Apple shows us but we haven't catalogued — surface to UI
 			// so the admin can decide whether to add it as a managed_app.
 			unmatched = append(unmatched, map[string]interface{}{
-				"adam_id":         a.AdamID,
-				"total_count":     a.TotalCount,
-				"assigned_count":  a.AssignedCount,
-				"product_type":    a.ProductTypeName,
+				"adam_id":        a.AdamID,
+				"total_count":    a.TotalCount,
+				"assigned_count": a.AssignedCount,
+				"product_type":   a.ProductTypeName,
 			})
 		} else {
 			updated += n
@@ -227,7 +227,7 @@ func (c *AppController) handleManagedApps(w http.ResponseWriter, r *http.Request
 				"app_type": a.AppType, "itunes_store_id": a.ItunesStoreID,
 				"manifest_url": a.ManifestURL, "purchased_qty": a.PurchasedQty,
 				"notes": a.Notes, "created_at": a.CreatedAt.Format(time.RFC3339),
-				"updated_at": a.UpdatedAt.Format(time.RFC3339),
+				"updated_at":      a.UpdatedAt.Format(time.RFC3339),
 				"installed_count": a.InstalledCount, "icon_url": a.IconURL,
 				"supported_platforms": a.SupportedPlatforms,
 			})
@@ -353,7 +353,7 @@ func (c *AppController) handleDeviceApps(w http.ResponseWriter, r *http.Request)
 		rows = append(rows, map[string]interface{}{
 			"id": d.ID, "device_udid": d.DeviceUdid, "app_id": d.AppID,
 			"installed_at": d.InstalledAt.Format(time.RFC3339),
-			"app_name": d.AppName, "bundle_id": d.BundleID, "app_type": d.AppType,
+			"app_name":     d.AppName, "bundle_id": d.BundleID, "app_type": d.AppType,
 		})
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"device_apps": rows})

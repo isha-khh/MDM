@@ -58,6 +58,12 @@ func cleanName(n string) string {
 	return strings.TrimSpace(roleSuffixRe.ReplaceAllString(strings.TrimSpace(n), ""))
 }
 
+// isBlank: nothing, or only the dash placeholders a template leaves behind
+// ("地點：—"). A field holding just a placeholder counts as not filled in.
+func isBlank(v string) bool {
+	return strings.Trim(strings.TrimSpace(v), "-–—－﹣─ \t　") == ""
+}
+
 func splitList(v string) []string {
 	parts := strings.FieldsFunc(v, func(r rune) bool {
 		switch r {
@@ -68,7 +74,7 @@ func splitList(v string) []string {
 	})
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
+		if p = strings.TrimSpace(p); !isBlank(p) {
 			out = append(out, p)
 		}
 	}
@@ -111,6 +117,9 @@ func ParseDescription(desc string) Trip {
 		if seen[key] {
 			continue
 		}
+		if isBlank(val) {
+			val = "" // a placeholder is "not filled in", but still the header's own line
+		}
 		switch key {
 		case "地點":
 			t.Location = val
@@ -126,6 +135,36 @@ func ParseDescription(desc string) Trip {
 		seen[key] = true
 	}
 	return t
+}
+
+// RequiredFields are the labels every business-trip event must fill in, in the
+// order they appear in the template.
+var RequiredFields = []string{"地點", "時間", "交通", "協會人員", "信箱"}
+
+// Missing lists the required fields that are empty (or only a placeholder),
+// in template order. An event is only mailed about when this is empty, so a
+// half-filled event is reported rather than guessed at.
+func (t Trip) Missing() []string {
+	var m []string
+	for _, f := range RequiredFields {
+		var filled bool
+		switch f {
+		case "地點":
+			filled = t.Location != ""
+		case "時間":
+			filled = t.Time != ""
+		case "交通":
+			filled = t.Transport != ""
+		case "協會人員":
+			filled = len(t.Names) > 0
+		case "信箱":
+			filled = len(t.Emails) > 0
+		}
+		if !filled {
+			m = append(m, f)
+		}
+	}
+	return m
 }
 
 var bracketRe = regexp.MustCompile(`[（(]([^）)]*)[）)]`)

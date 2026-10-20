@@ -67,6 +67,14 @@ func (c *GoogleCalendarController) annotateNotices(ctx context.Context, events [
 	}
 }
 
+// incompleteEvent is a due trip that was skipped for missing required fields.
+type incompleteEvent struct {
+	CalendarID string   `json:"calendar_id"`
+	EventID    string   `json:"event_id"`
+	Summary    string   `json:"summary"`
+	Missing    []string `json:"missing"`
+}
+
 type noticeResult struct {
 	CalendarID string `json:"calendar_id"`
 	EventID    string `json:"event_id"`
@@ -138,6 +146,7 @@ func (c *GoogleCalendarController) handleSendNotices(w http.ResponseWriter, r *h
 	c.annotateNotices(r.Context(), res.Events, c.now())
 
 	results := []noticeResult{}
+	incomplete := []incompleteEvent{}
 	matched, truncated := false, false
 	// Mark* run detached from the request: if the admin closes the page after
 	// the mail left, the log must still say "sent", or it would go out again
@@ -155,6 +164,12 @@ loop:
 		}
 		start, ok := eventStart(ev.Event)
 		if !ok {
+			continue
+		}
+		// The calendar format is mandatory: a half-filled event is reported to
+		// the admin to fix, not mailed about on a guess.
+		if len(ev.FormatMissing) > 0 {
+			incomplete = append(incomplete, incompleteEvent{CalendarID: ev.CalendarID, EventID: ev.ID, Summary: ev.Summary, Missing: ev.FormatMissing})
 			continue
 		}
 		for _, cand := range ev.Candidates {
@@ -221,7 +236,7 @@ loop:
 		counts[o.Result]++
 	}
 	log.Printf("[trip-notice] send by user=%s sent=%d already=%d failed=%d", claims.UserID, counts["sent"], counts["already_sent"], counts["failed"])
-	writeJSON(w, map[string]interface{}{"results": results, "counts": counts, "truncated": truncated, "calendars": res.Calendars})
+	writeJSON(w, map[string]interface{}{"results": results, "counts": counts, "truncated": truncated, "incomplete": incomplete, "calendars": res.Calendars})
 }
 
 func sentCount(rs []noticeResult) int {

@@ -112,6 +112,15 @@ func (m *fakeMailer) recipients() []string {
 
 const sendPath = basePath + "/notices/send"
 
+// tripDesc is a description in the mandatory format, with every field filled.
+func tripDesc(location string, names ...string) string {
+	lines := []string{"地點：" + location, "時間：09:00-12:00", "交通：高鐵＋租車"}
+	for _, n := range names {
+		lines = append(lines, "協會人員："+n)
+	}
+	return strings.Join(append(lines, "信箱：someone@mail.isha.org.tw"), "\n")
+}
+
 // noticeEnv: today is 2026-10-20 (Taipei); the directory has the sample people.
 // "e-two" starts Oct 27 (7 days: window opens today) with four attendees.
 func noticeEnv(t *testing.T) (*env, *fakeNotices, *fakeMailer) {
@@ -120,7 +129,7 @@ func noticeEnv(t *testing.T) (*env, *fakeNotices, *fakeMailer) {
 	e.dir.users = directoryUsers()
 	e.g.events["ida@group"] = append(e.g.events["ida@group"], google.Event{
 		ID: "e-two", Summary: "76工危品進廠(臺南分局)", Start: "2026-10-27", AllDay: true,
-		Description: "進廠人員:夏宗瑜(管考)\n進廠人員:羅羿昇\n進廠人員:李念芷\n進廠人員:路人甲\n時間：09:00-12:00",
+		Description: tripDesc("臺南分局", "夏宗瑜(管考)", "羅羿昇", "李念芷", "路人甲"),
 	})
 	n, m := newFakeNotices(), &fakeMailer{failFor: map[string]error{}}
 	e.c.WithNotices(n, m)
@@ -128,8 +137,9 @@ func noticeEnv(t *testing.T) (*env, *fakeNotices, *fakeMailer) {
 }
 
 type sendResp struct {
-	Results []noticeResult `json:"results"`
-	Counts  map[string]int `json:"counts"`
+	Results    []noticeResult    `json:"results"`
+	Counts     map[string]int    `json:"counts"`
+	Incomplete []incompleteEvent `json:"incomplete"`
 }
 
 func postSend(t *testing.T, e *env, body string) (int, sendResp, string) {
@@ -147,12 +157,13 @@ func TestSend_MailsOnlyLicensedDueAttendeesAndOnlyOnce(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("%d %s", code, raw)
 	}
-	// Due and target: e-two (Oct 27) and e-visit (Oct 26, 高屏). Licensed and matched:
-	// 羅羿昇 (on both), 夏宗瑜 (e-two). 李念芷 has no license data, 路人甲 isn't in the
-	// directory, 吳宜蓁 (e-khh) has no license; the Miaoli trip isn't a target.
+	// Due, target and in the mandatory format: only e-two. Of its attendees,
+	// 羅羿昇 and 夏宗瑜 are licensed; 李念芷 has no license data and 路人甲 isn't in
+	// the directory. e-visit and e-khh are due targets too, but their
+	// descriptions lack required fields, so they are reported, not mailed.
 	got := mailer.recipients()
-	want := map[string]int{"yishengluo1006@mail.isha.org.tw": 2, "zoey.xia@mail.isha.org.tw": 1}
-	if len(got) != 3 {
+	want := map[string]int{"yishengluo1006@mail.isha.org.tw": 1, "zoey.xia@mail.isha.org.tw": 1}
+	if len(got) != 2 {
 		t.Fatalf("recipients: %v", got)
 	}
 	for _, r := range got {
@@ -163,11 +174,11 @@ func TestSend_MailsOnlyLicensedDueAttendeesAndOnlyOnce(t *testing.T) {
 			t.Errorf("%s: off by %d (got %v)", r, n, got)
 		}
 	}
-	if out.Counts["sent"] != 3 || out.Counts["failed"] != 0 {
+	if out.Counts["sent"] != 2 || out.Counts["failed"] != 0 {
 		t.Errorf("counts %+v", out.Counts)
 	}
-	if len(notices.rows) != 3 {
-		t.Errorf("log should hold exactly the 3 mails sent: %d rows", len(notices.rows))
+	if len(notices.rows) != 2 {
+		t.Errorf("log should hold exactly the 2 mails sent: %d rows", len(notices.rows))
 	}
 	for _, m := range mailer.sent {
 		if !strings.Contains(m.subject, "出差借車提醒") || !strings.Contains(m.body, "您好") {
@@ -187,7 +198,7 @@ func TestSend_MailsOnlyLicensedDueAttendeesAndOnlyOnce(t *testing.T) {
 	// Pressing again mails nobody.
 	before := len(mailer.sent)
 	code, out, _ = postSend(t, e, "")
-	if code != 200 || len(mailer.sent) != before || out.Counts["sent"] != 0 || out.Counts["already_sent"] != 3 {
+	if code != 200 || len(mailer.sent) != before || out.Counts["sent"] != 0 || out.Counts["already_sent"] != 2 {
 		t.Errorf("second press: %d sent=%d counts=%+v", code, len(mailer.sent)-before, out.Counts)
 	}
 
@@ -204,8 +215,8 @@ func TestSend_MailsOnlyLicensedDueAttendeesAndOnlyOnce(t *testing.T) {
 			}
 		}
 	}
-	if seen != 3 {
-		t.Errorf("preview shows %d as notified, want 3", seen)
+	if seen != 2 {
+		t.Errorf("preview shows %d as notified, want 2", seen)
 	}
 }
 
@@ -213,8 +224,8 @@ func TestSend_WindowIsRespected(t *testing.T) {
 	e, _, mailer := noticeEnv(t)
 	// Oct 28 is 8 days away: the window hasn't opened. A trip that started today is too late.
 	e.g.events["ida@group"] = []google.Event{
-		{ID: "far", Summary: "遠(臺南分局)", Start: "2026-10-28", AllDay: true, Description: "進廠人員:羅羿昇"},
-		{ID: "late", Summary: "已出發(臺南分局)", Start: "2026-10-20", AllDay: true, Description: "進廠人員:羅羿昇"},
+		{ID: "far", Summary: "遠(臺南分局)", Start: "2026-10-28", AllDay: true, Description: tripDesc("臺南", "羅羿昇")},
+		{ID: "late", Summary: "已出發(臺南分局)", Start: "2026-10-20", AllDay: true, Description: tripDesc("臺南", "羅羿昇")},
 	}
 	e.g.events["bip@group"] = nil
 	if code, out, raw := postSend(t, e, ""); code != 200 || len(mailer.sent) != 0 || out.Counts["sent"] != 0 {
@@ -227,7 +238,7 @@ func TestSend_FailureIsLoggedAndRetriedWithoutResendingTheRest(t *testing.T) {
 	mailer.failFor["zoey.xia@mail.isha.org.tw"] = errors.New("smtp: 550 mailbox unavailable")
 
 	_, out, _ := postSend(t, e, "")
-	if out.Counts["sent"] != 2 || out.Counts["failed"] != 1 {
+	if out.Counts["sent"] != 1 || out.Counts["failed"] != 1 {
 		t.Fatalf("counts %+v", out.Counts)
 	}
 	var failed *domain.TripCarNotice
@@ -252,7 +263,7 @@ func TestSend_FailureIsLoggedAndRetriedWithoutResendingTheRest(t *testing.T) {
 func TestSend_RescheduledTripIsAnnouncedAgain(t *testing.T) {
 	e, _, mailer := noticeEnv(t)
 	e.g.events["bip@group"] = nil
-	e.g.events["ida@group"] = []google.Event{{ID: "t", Summary: "進廠(臺南分局)", Start: "2026-10-26", AllDay: true, Description: "進廠人員:羅羿昇"}}
+	e.g.events["ida@group"] = []google.Event{{ID: "t", Summary: "進廠(臺南分局)", Start: "2026-10-26", AllDay: true, Description: tripDesc("臺南", "羅羿昇")}}
 	postSend(t, e, "")
 	e.g.events["ida@group"][0].Start = "2026-10-27" // moved a day
 	postSend(t, e, "")
@@ -312,7 +323,7 @@ func TestSend_LogFailureMeansNoMail(t *testing.T) {
 	e, notices, mailer := noticeEnv(t)
 	notices.claimErr = errors.New("db down")
 	code, out, _ := postSend(t, e, "")
-	if code != 200 || len(mailer.sent) != 0 || out.Counts["failed"] != 3 {
+	if code != 200 || len(mailer.sent) != 0 || out.Counts["failed"] != 2 {
 		t.Errorf("if the log can't be written, no mail may go out: %d sent=%d %+v", code, len(mailer.sent), out.Counts)
 	}
 }
@@ -338,5 +349,56 @@ func TestSend_RequiresSysAdmin(t *testing.T) {
 	}
 	if len(mailer.sent) != 0 || len(notices.rows) != 0 {
 		t.Error("an unauthorised request had an effect")
+	}
+}
+
+func TestSend_OnlyMailsEventsInTheMandatoryFormat(t *testing.T) {
+	e, notices, mailer := noticeEnv(t)
+	e.g.events["bip@group"] = nil
+	ev := func(id, desc string) google.Event {
+		return google.Event{ID: id, Summary: id + "(臺南分局)", Start: "2026-10-27", AllDay: true, Description: desc}
+	}
+	full := tripDesc("臺南", "羅羿昇")
+	e.g.events["ida@group"] = []google.Event{
+		ev("ok", full),
+		ev("no-time", strings.Replace(full, "時間：09:00-12:00\n", "", 1)),
+		ev("no-transport", strings.Replace(full, "交通：高鐵＋租車\n", "", 1)),
+		ev("no-mail", strings.Replace(full, "\n信箱：someone@mail.isha.org.tw", "", 1)),
+		ev("placeholders", "地點：臺南\n時間：—\n交通：—\n協會人員：羅羿昇\n信箱：—"),
+		ev("no-names", strings.Replace(full, "協會人員：羅羿昇\n", "協會人員：—\n", 1)),
+	}
+	code, out, raw := postSend(t, e, "")
+	if code != 200 {
+		t.Fatalf("%d %s", code, raw)
+	}
+	if len(mailer.sent) != 1 || !strings.Contains(mailer.sent[0].to, "yishengluo1006") || len(notices.rows) != 1 {
+		t.Fatalf("only the complete event may be mailed: %v", mailer.recipients())
+	}
+	missing := map[string]string{}
+	for _, inc := range out.Incomplete {
+		missing[inc.EventID] = strings.Join(inc.Missing, ",")
+	}
+	want := map[string]string{
+		"no-time": "時間", "no-transport": "交通", "no-mail": "信箱",
+		"placeholders": "時間,交通,信箱", "no-names": "協會人員",
+	}
+	if len(missing) != len(want) {
+		t.Errorf("incomplete: %v", missing)
+	}
+	for id, w := range want {
+		if missing[id] != w {
+			t.Errorf("%s: missing %q, want %q", id, missing[id], w)
+		}
+	}
+
+	// The preview shows the same, per event.
+	_, prev := previewWithDirectory(t, e)
+	for _, pe := range prev.Events {
+		if pe.ID == "ok" && len(pe.FormatMissing) != 0 {
+			t.Errorf("complete event flagged: %v", pe.FormatMissing)
+		}
+		if pe.ID == "no-time" && strings.Join(pe.FormatMissing, ",") != "時間" {
+			t.Errorf("preview missing: %v", pe.FormatMissing)
+		}
 	}
 }

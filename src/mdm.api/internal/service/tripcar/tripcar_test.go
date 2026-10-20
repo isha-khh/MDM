@@ -2,6 +2,7 @@ package tripcar
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -417,5 +418,47 @@ func TestEvaluate_NameOnlyEventWithMissingDirectoryData(t *testing.T) {
 	// 李念芷: car unknown (rank 1); 夏宗瑜 owns a car (rank 2) -> unknown first.
 	if r.Candidates[0].User.SamAccountName != "s01023" || r.Candidates[1].User.SamAccountName != "zoey.xia" {
 		t.Errorf("priority order: %+v", r.Candidates)
+	}
+}
+
+func TestTrip_MissingRequiredFields(t *testing.T) {
+	full := "地點：臺南\n時間：09:00-12:00\n交通：高鐵＋租車\n協會人員：羅羿昇\n信箱：a@x.org"
+	if m := ParseDescription(full).Missing(); len(m) != 0 {
+		t.Errorf("complete description reported missing %v", m)
+	}
+	cases := []struct {
+		name, desc string
+		want       []string
+	}{
+		{"empty", "", []string{"地點", "時間", "交通", "協會人員", "信箱"}},
+		{"labels with nothing after them", "地點：\n時間：\n交通：\n協會人員：\n信箱：", []string{"地點", "時間", "交通", "協會人員", "信箱"}},
+		{"template placeholders", "地點：—\n時間：—\n交通：—\n協會人員：—\n信箱：—", []string{"地點", "時間", "交通", "協會人員", "信箱"}},
+		{"other dash styles and spacing", "地點： - \n時間：－－\n交通：–\n協會人員：　—　\n信箱：—、—", []string{"地點", "時間", "交通", "協會人員", "信箱"}},
+		{"one gap", "地點：臺南\n時間：09:00\n協會人員：羅羿昇\n信箱：a@x.org", []string{"交通"}},
+		{"factory-visit attendee label counts as attendees", "地點：臺南\n時間：09:00\n交通：自駕\n進廠人員：羅羿昇\n信箱：a@x.org", nil},
+	}
+	for _, c := range cases {
+		got := ParseDescription(c.desc).Missing()
+		if strings.Join(got, ",") != strings.Join(c.want, ",") {
+			t.Errorf("%s: missing %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestParseDescription_PlaceholderHeaderIsNotOverriddenByLaterItinerary(t *testing.T) {
+	// An empty header line still is the header: a later itinerary "地點" must not fill it in.
+	tr := ParseDescription("地點：—\n時間：09:00\n交通：自駕\n協會人員：羅羿昇\n信箱：a@x.org\n行程\n地點：某公司")
+	if tr.Location != "" {
+		t.Errorf("location %q", tr.Location)
+	}
+	if m := tr.Missing(); len(m) != 1 || m[0] != "地點" {
+		t.Errorf("missing %v", m)
+	}
+}
+
+func TestParseDescription_PlaceholderNamesAndEmailsAreDropped(t *testing.T) {
+	tr := ParseDescription("協會人員：羅羿昇、—\n信箱：a@x.org、—")
+	if len(tr.Names) != 1 || tr.Names[0] != "羅羿昇" || len(tr.Emails) != 1 {
+		t.Errorf("%+v", tr)
 	}
 }

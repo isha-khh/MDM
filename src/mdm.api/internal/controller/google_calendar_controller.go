@@ -689,9 +689,12 @@ type previewEvent struct {
 	// NoticeDue: a target trip whose notice window (7 days before the start,
 	// up to the start day) is open today. DaysUntil counts Taipei calendar
 	// days from today to the start (0 = today, negative = already started).
-	NoticeDue  bool   `json:"notice_due"`
-	NoticeFrom string `json:"notice_from,omitempty"`
-	DaysUntil  int    `json:"days_until"`
+	// FormatMissing lists the required description fields (地點/時間/交通/
+	// 協會人員/信箱) left empty. Only complete events are mailed about.
+	FormatMissing []string `json:"format_missing"`
+	NoticeDue     bool     `json:"notice_due"`
+	NoticeFrom    string   `json:"notice_from,omitempty"`
+	DaysUntil     int      `json:"days_until"`
 }
 
 type previewCandidate struct {
@@ -748,7 +751,7 @@ func buildPreviewEvent(cal google.Calendar, ev google.Event, users []tripcar.Use
 	if trip.Emails == nil {
 		trip.Emails = []string{}
 	}
-	p := previewEvent{Event: ev, CalendarID: cal.ID, CalendarSummary: cal.Summary, Trip: trip, Candidates: []previewCandidate{}}
+	p := previewEvent{Event: ev, CalendarID: cal.ID, CalendarSummary: cal.Summary, Trip: trip, Candidates: []previewCandidate{}, FormatMissing: trip.Missing()}
 	switch {
 	case trip.Location != "":
 		p.LocationUsed, p.LocationSource = trip.Location, "description"

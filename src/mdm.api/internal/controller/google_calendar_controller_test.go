@@ -969,6 +969,16 @@ func directoryUsers() []tripcar.User {
 	}
 }
 
+type previewEventJSON struct {
+	ID            string     `json:"id"`
+	Target        bool       `json:"target_location"`
+	NoticeDue     bool       `json:"notice_due"`
+	FormatMissing []string   `json:"format_missing"`
+	NoticeFrom    string     `json:"notice_from"`
+	DaysUntil     int        `json:"days_until"`
+	Candidates    []candJSON `json:"candidates"`
+}
+
 type candJSON struct {
 	Name, Email, Account, Decision string
 	Priority                       int
@@ -983,14 +993,7 @@ type previewWithCandidates struct {
 		Users      int    `json:"users"`
 		Error      string `json:"error"`
 	} `json:"directory"`
-	Events []struct {
-		ID         string     `json:"id"`
-		Target     bool       `json:"target_location"`
-		NoticeDue  bool       `json:"notice_due"`
-		NoticeFrom string     `json:"notice_from"`
-		DaysUntil  int        `json:"days_until"`
-		Candidates []candJSON `json:"candidates"`
-	} `json:"events"`
+	Events []previewEventJSON `json:"events"`
 }
 
 func previewWithDirectory(t *testing.T, e *env) (*httptest.ResponseRecorder, previewWithCandidates) {
@@ -1003,14 +1006,7 @@ func previewWithDirectory(t *testing.T, e *env) (*httptest.ResponseRecorder, pre
 	return rec, out
 }
 
-func (p previewWithCandidates) event(id string) (e struct {
-	ID         string     `json:"id"`
-	Target     bool       `json:"target_location"`
-	NoticeDue  bool       `json:"notice_due"`
-	NoticeFrom string     `json:"notice_from"`
-	DaysUntil  int        `json:"days_until"`
-	Candidates []candJSON `json:"candidates"`
-}) {
+func (p previewWithCandidates) event(id string) (e previewEventJSON) {
 	for _, ev := range p.Events {
 		if ev.ID == id {
 			return ev
@@ -1097,14 +1093,7 @@ func TestPreview_UsesTaipeiCalendarDaysNotUTC(t *testing.T) {
 	e.dir.users = directoryUsers()
 	e.g.events["ida@group"] = []google.Event{{ID: "x", Summary: "x(臺南分局)", Start: "2026-10-27", AllDay: true, Description: "進廠人員:羅羿昇"}}
 	e.g.events["bip@group"] = nil
-	if ev := func() (r struct {
-		ID         string     `json:"id"`
-		Target     bool       `json:"target_location"`
-		NoticeDue  bool       `json:"notice_due"`
-		NoticeFrom string     `json:"notice_from"`
-		DaysUntil  int        `json:"days_until"`
-		Candidates []candJSON `json:"candidates"`
-	}) {
+	if ev := func() (r previewEventJSON) {
 		_, o := previewWithDirectory(t, e)
 		return o.event("x")
 	}(); ev.DaysUntil != 7 || !ev.NoticeDue {

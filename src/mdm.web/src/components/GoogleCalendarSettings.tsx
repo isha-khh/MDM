@@ -34,6 +34,7 @@ interface PreviewEvent {
   target_location: boolean;
   candidates: Candidate[];
   notice_due: boolean;
+  format_missing: string[];
   notice_from?: string;
   days_until: number;
 }
@@ -70,6 +71,8 @@ const DECISION_BADGE: Record<Decision, { cls: string; label: string }> = {
   no_license: { cls: "badge-ghost", label: "無駕照" },
   unmatched: { cls: "badge-error", label: "找不到人" },
 };
+
+const REQUIRED_FIELDS = ["地點", "時間", "交通", "協會人員", "信箱"];
 
 const LOCATION_SOURCE_LABELS: Record<string, string> = {
   description: "說明欄「地點：」",
@@ -246,7 +249,7 @@ export function GoogleCalendarSettings() {
 
   // Who would be mailed now: matched, licensed, window open, not yet notified.
   const pendingFor = (ev: PreviewEvent) =>
-    ev.target_location && ev.notice_due
+    ev.target_location && ev.notice_due && ev.format_missing.length === 0
       ? ev.candidates.filter((c) => c.decision === "notify" && c.email && c.notice_status !== "sent")
       : [];
 
@@ -259,7 +262,7 @@ export function GoogleCalendarSettings() {
     if (!(await dialog.confirm(`將寄出 ${recipients.length} 封借車通知：\n${shown}\n\n每人每個行程只會寄一次。確定寄出？`))) return;
     setSending(only ? only.calendar_id + only.id : "all");
     try {
-      const { data } = await apiClient.post<{ results: NoticeResult[]; counts: Record<string, number>; truncated: boolean }>(
+      const { data } = await apiClient.post<{ results: NoticeResult[]; counts: Record<string, number>; truncated: boolean; incomplete: { summary: string; missing: string[] }[] }>(
         "/api/settings/google-calendar/notices/send",
         only ? { calendar_id: only.calendar_id, event_id: only.id } : {},
       );
@@ -267,8 +270,9 @@ export function GoogleCalendarSettings() {
       const lines = [`已寄出 ${data.counts.sent ?? 0} 封`];
       if (data.counts.already_sent) lines.push(`先前已通知 ${data.counts.already_sent} 位（略過）`);
       if (failed.length) lines.push(`失敗 ${failed.length} 封：\n` + failed.map((f) => `${f.email}：${f.error}`).join("\n"));
+      if (data.incomplete?.length) lines.push(`格式不完整、未寄出 ${data.incomplete.length} 個活動：\n` + data.incomplete.map((i) => `${i.summary}（缺 ${i.missing.join("、")}）`).join("\n"));
       if (data.truncated) lines.push("數量很多，這次只寄了一部分，請再按一次");
-      await (failed.length ? dialog.error(lines.join("\n")) : dialog.success(lines.join("\n")));
+      await (failed.length || data.incomplete?.length ? dialog.error(lines.join("\n")) : dialog.success(lines.join("\n")));
       await loadPreview();
     } catch (err) {
       await dialog.error("寄送失敗：" + errorText(err, ""));
@@ -495,7 +499,10 @@ export function GoogleCalendarSettings() {
                               {ev.target_location
                                 ? <span className="badge badge-success badge-sm">符合地點</span>
                                 : <span className="badge badge-ghost badge-sm">{ev.location_used ? "不符合" : "沒有地點"}</span>}
-                              {ev.target_location && ev.candidates.length > 0 && (
+                              {ev.target_location && ev.format_missing.length > 0 && (
+                                <span className="badge badge-warning badge-sm">格式不完整：缺 {ev.format_missing.join("、")}</span>
+                              )}
+                              {ev.target_location && ev.format_missing.length === 0 && ev.candidates.length > 0 && (
                                 ev.notice_due
                                   ? <span className="badge badge-info badge-sm">今天起可通知</span>
                                   : ev.days_until > 0
@@ -522,6 +529,9 @@ export function GoogleCalendarSettings() {
                                     借車通知對象（沒有自己車的排前面）
                                     {ev.candidates.length > 0 && ev.days_until > 0 && <span>：出發前 7 天（{ev.notice_from}）起寄出，還有 {ev.days_until} 天出發</span>}
                                   </div>
+                                  {ev.format_missing.length > 0 && (
+                                    <p className="text-warning mb-1">說明欄少了必填欄位（{ev.format_missing.join("、")}），補齊前不會寄出通知。五個欄位都要填：{REQUIRED_FIELDS.join("、")}。</p>
+                                  )}
                                   {!preview.directory?.configured
                                     ? <p className="opacity-60">尚未設定人員目錄，無法比對駕照與車輛。</p>
                                     : preview.directory.error
