@@ -256,9 +256,14 @@ type DEPSchedulerRunner interface {
 // (single row). It only ever sees ciphertext; encryption happens in the caller.
 type GoogleCalendarSettingsRepository interface {
 	Get(ctx context.Context) (*domain.GoogleCalendarSettings, error)
-	// SaveClient stores a new client ID and encrypted secret. It also clears
-	// any refresh token: a token is only valid for the client that issued it.
-	SaveClient(ctx context.Context, clientID, clientSecretEnc, updatedBy string) error
-	// Clear removes the client and refresh token entirely.
+	// SaveClient stores a new client ID, encrypted secret and the callback URLs
+	// registered for it. It also clears any refresh token and connected
+	// account: a token is only valid for the client that issued it.
+	SaveClient(ctx context.Context, clientID, clientSecretEnc string, redirectURIs []string, updatedBy string) error
+	// SaveRefreshToken records a completed authorisation.
+	SaveRefreshToken(ctx context.Context, refreshTokenEnc, connectedAccount, updatedBy string) error
+	// ClearRefreshToken disconnects the account but keeps the client credentials.
+	ClearRefreshToken(ctx context.Context, updatedBy string) error
+	// Clear removes the client, token and account entirely.
 	Clear(ctx context.Context, updatedBy string) error
 }

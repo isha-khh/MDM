@@ -106,3 +106,6 @@ var Migration034SQL string
 
 //go:embed migrations/035_google_calendar_settings.up.sql
 var Migration035SQL string
+
+//go:embed migrations/036_google_calendar_oauth_flow.up.sql
+var Migration036SQL string
