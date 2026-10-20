@@ -65,7 +65,9 @@ type GoogleCalendarController struct {
 	// notices (the already-notified log) and mailer enable sending; see WithNotices.
 	notices port.TripCarNoticeRepository
 	mailer  noticeMailer
-	box     *secretbox.Box // nil when SETTINGS_ENCRYPTION_KEY is unset/invalid
+	// schedule holds the daily auto-send setting; see WithSchedule.
+	schedule port.TripNoticeScheduleRepository
+	box      *secretbox.Box // nil when SETTINGS_ENCRYPTION_KEY is unset/invalid
 	// boxErr says why box is nil, shown to the admin so the fix is obvious.
 	boxErr string
 	auth   *middleware.AuthHelper
@@ -90,6 +92,7 @@ func (c *GoogleCalendarController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/google-calendar/calendars", c.handleSelectCalendars)
 	mux.HandleFunc("/api/settings/google-calendar/events", c.handleEventsPreview)
 	mux.HandleFunc("/api/settings/google-calendar/notices/send", c.handleSendNotices)
+	mux.HandleFunc("/api/settings/google-calendar/notices/schedule", c.handleSchedule)
 	mux.HandleFunc("/api/settings/google-calendar/disconnect", c.handleDisconnect)
 }
 

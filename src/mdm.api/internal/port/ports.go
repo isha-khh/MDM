@@ -292,3 +292,17 @@ type TripCarNoticeRepository interface {
 	// given date ("2006-01-02").
 	ListFromDate(ctx context.Context, date string) ([]domain.TripCarNotice, error)
 }
+
+// TripNoticeScheduleRepository stores the daily-send setting and the per-day
+// run claim.
+type TripNoticeScheduleRepository interface {
+	Get(ctx context.Context) (*domain.TripNoticeSchedule, error)
+	Save(ctx context.Context, enabled bool, sendHour int, by string) error
+	// ClaimRun takes today's run (a Taipei date, "2006-01-02"): true only for
+	// the one caller that finds the schedule enabled and today not yet taken.
+	ClaimRun(ctx context.Context, today string) (bool, error)
+	// ReleaseRun gives today's claim back so the next tick tries again (the
+	// run couldn't complete, e.g. Google was unreachable).
+	ReleaseRun(ctx context.Context, today string) error
+	RecordRun(ctx context.Context, summary string) error
+}
