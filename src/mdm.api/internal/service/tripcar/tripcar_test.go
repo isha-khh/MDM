@@ -561,3 +561,70 @@ func TestTrip_PairingProblem(t *testing.T) {
 		}
 	}
 }
+
+// A real description in the agreed format, verbatim.
+const realAgreedSample = `地點:經濟部園區管理局(811高雄市楠梓區瑞屏里加昌路600號)、中油林園廠(832高雄市林園區五福里石化二路3號)
+時間:1000-1200
+交通:開車
+協會人員:劉名政、吳宜蓁
+信箱:foylaou0326@mail.isha.org.tw、idsl5397@mail.isha.org.tw`
+
+func TestRealAgreedSample_Parse(t *testing.T) {
+	tr := ParseDescription(realAgreedSample)
+	if tr.Location != "經濟部園區管理局(811高雄市楠梓區瑞屏里加昌路600號)、中油林園廠(832高雄市林園區五福里石化二路3號)" {
+		t.Errorf("location (addresses must stay whole, not be split on 、): %q", tr.Location)
+	}
+	if tr.Time != "1000-1200" || tr.Transport != "開車" {
+		t.Errorf("time %q transport %q", tr.Time, tr.Transport)
+	}
+	if strings.Join(tr.Names, ",") != "劉名政,吳宜蓁" {
+		t.Errorf("names %v", tr.Names)
+	}
+	if strings.Join(tr.Emails, ",") != "foylaou0326@mail.isha.org.tw,idsl5397@mail.isha.org.tw" {
+		t.Errorf("emails %v", tr.Emails)
+	}
+	if m := tr.Missing(); len(m) != 0 || tr.PairingProblem() {
+		t.Errorf("a complete event reported problems: missing %v pairing %v", m, tr.PairingProblem())
+	}
+}
+
+func TestRealAgreedSample_AlsoParsesFromGoogleHTML(t *testing.T) {
+	// Google's editor stores the same text as HTML.
+	html := strings.ReplaceAll(realAgreedSample, "\n", "<br>")
+	html = "<b>" + html + "</b>"
+	a, b := ParseDescription(html), ParseDescription(realAgreedSample)
+	if strings.Join(a.Names, ",") != strings.Join(b.Names, ",") || a.Location != b.Location || a.Time != b.Time || len(a.Missing()) != 0 {
+		t.Errorf("html %+v vs plain %+v", a, b)
+	}
+}
+
+func TestRealAgreedSample_TargetsByTheAddressCounty(t *testing.T) {
+	loc := ParseDescription(realAgreedSample).Location
+	if !LocationMatches(loc, DefaultTargetCounties) {
+		t.Error("高雄市 in the addresses should make this a target trip")
+	}
+	// The same shape with a non-target address must not match.
+	other := "某公司(404台中市北區某路1號)、某廠(苗栗縣竹南鎮某路2號)"
+	if LocationMatches(other, DefaultTargetCounties) {
+		t.Error("Taichung / Miaoli addresses are not targets")
+	}
+}
+
+func TestRealAgreedSample_Evaluate(t *testing.T) {
+	users := []User{
+		{SamAccountName: "foylaou0326", DisplayName: "26安環處-高雄-劉名政", Mail: "foylaou0326@mail.isha.org.tw", HasDriverLicense: bp(true), HasOwnCar: bp(false)},
+		{SamAccountName: "idsl5397", DisplayName: "26安環處-高雄-吳宜蓁", Mail: "idsl5397@mail.isha.org.tw", HasDriverLicense: bp(false), HasOwnCar: bp(false)},
+		{SamAccountName: "ids", DisplayName: "吳宜蓁"}, // old short account of the same person, no mail
+	}
+	res := Evaluate(ParseDescription(realAgreedSample), users, DefaultTargetCounties)
+	if !res.Applicable || len(res.Candidates) != 2 {
+		t.Fatalf("%+v", res)
+	}
+	c0, c1 := res.Candidates[0], res.Candidates[1]
+	if c0.Name != "劉名政" || c0.Decision != Notify || c0.User.SamAccountName != "foylaou0326" {
+		t.Errorf("first: %+v", c0)
+	}
+	if c1.Name != "吳宜蓁" || c1.Decision != NoLicense || c1.User.SamAccountName != "idsl5397" {
+		t.Errorf("second (explicitly no license, and the old account must not be picked): %+v", c1)
+	}
+}

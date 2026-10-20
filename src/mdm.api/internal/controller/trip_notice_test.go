@@ -11,6 +11,7 @@ import (
 
 	"github.com/anthropics/mdm-server/internal/adapter/google"
 	"github.com/anthropics/mdm-server/internal/domain"
+	"github.com/anthropics/mdm-server/internal/service/tripcar"
 )
 
 // fakeNotices keeps the claim rules of the SQL repo: a notice that is sent or
@@ -414,4 +415,65 @@ func TestSend_OnlyMailsEventsInTheMandatoryFormat(t *testing.T) {
 			t.Errorf("preview missing: %v", pe.FormatMissing)
 		}
 	}
+}
+
+const realAgreedSampleDesc = `地點:經濟部園區管理局(811高雄市楠梓區瑞屏里加昌路600號)、中油林園廠(832高雄市林園區五福里石化二路3號)
+時間:1000-1200
+交通:開車
+協會人員:劉名政、吳宜蓁
+信箱:foylaou0326@mail.isha.org.tw、idsl5397@mail.isha.org.tw`
+
+func TestSend_RealAgreedSampleEndToEnd(t *testing.T) {
+	e, notices, mailer := noticeEnv(t)
+	e.dir.users = append(directoryUsers(),
+		tripcarUser("foylaou0326", "26安環處-高雄-劉名政", "foylaou0326@mail.isha.org.tw", bp(true), bp(false)))
+	e.g.events["bip@group"] = nil
+	e.g.events["ida@group"] = []google.Event{{
+		ID: "real", Summary: "園區查核", Start: "2026-10-23T10:00:00+08:00", Description: realAgreedSampleDesc,
+	}}
+
+	// Preview: a complete target event with two paired attendees.
+	_, prev := previewWithDirectory(t, e)
+	ev := prev.event("real")
+	if !ev.Target || len(ev.FormatMissing) != 0 || !ev.NoticeDue || ev.DaysUntil != 3 {
+		t.Fatalf("event: %+v", ev)
+	}
+	if len(ev.Candidates) != 2 || ev.Candidates[0].Name != "劉名政" || ev.Candidates[0].Decision != "notify" ||
+		ev.Candidates[1].Name != "吳宜蓁" || ev.Candidates[1].Decision != "no_license" {
+		t.Fatalf("candidates: %+v", ev.Candidates)
+	}
+
+	// Send: only 劉名政 (licensed) is mailed, to the mailbox in the event.
+	code, out, raw := postSend(t, e, "")
+	if code != 200 || out.Counts["sent"] != 1 || len(out.Incomplete) != 0 {
+		t.Fatalf("%d %s", code, raw)
+	}
+	m := mailer.sent[0]
+	if m.to != "foylaou0326@mail.isha.org.tw" {
+		t.Errorf("sent to %q", m.to)
+	}
+	for _, want := range []string{"劉名政 您好", "2026-10-23 10:00", "楠梓區", "林園區", "1000-1200", "開車"} {
+		if !strings.Contains(m.body, want) {
+			t.Errorf("mail body lacks %q", want)
+		}
+	}
+	if strings.Contains(m.to, "idsl5397") || len(notices.rows) != 1 {
+		t.Errorf("the unlicensed attendee must not be mailed or logged: rows=%d", len(notices.rows))
+	}
+	if strings.ContainsAny(m.subject, "\r\n") {
+		t.Errorf("subject: %q", m.subject)
+	}
+
+	// Pressing again does nothing, and the preview now shows who was notified.
+	if _, again, _ := postSend(t, e, ""); again.Counts["sent"] != 0 || len(mailer.sent) != 1 {
+		t.Errorf("second press: %+v", again.Counts)
+	}
+	_, prev = previewWithDirectory(t, e)
+	if c := prev.event("real").Candidates[0]; c.NoticeStatus != "sent" {
+		t.Errorf("preview should show 劉名政 as notified: %+v", c)
+	}
+}
+
+func tripcarUser(account, display, mail string, license, car *bool) tripcar.User {
+	return tripcar.User{SamAccountName: account, DisplayName: display, Mail: mail, HasDriverLicense: license, HasOwnCar: car}
 }
