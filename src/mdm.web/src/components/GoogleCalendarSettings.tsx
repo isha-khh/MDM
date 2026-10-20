@@ -29,6 +29,14 @@ const ROLE_LABELS: Record<string, string> = {
   freeBusyReader: "僅忙碌／空閒",
 };
 
+// An older backend (not yet restarted after an update) answers without the
+// newer fields; fill them in so the page renders and can say what's wrong
+// rather than crashing.
+const BACKEND_OUTDATED_NOTE = "後端還是舊版本（缺少授權流程的功能），請重啟後端後重新整理頁面";
+function normalize(data: GoogleCalendarStatus): GoogleCalendarStatus {
+  return { ...data, redirect_uris: data.redirect_uris ?? [] };
+}
+
 function errorText(err: unknown, fallback: string): string {
   const e = err as { response?: { data?: { error?: string } }; message?: string };
   return e?.response?.data?.error || e?.message || fallback;
@@ -51,7 +59,7 @@ export function GoogleCalendarSettings() {
   const load = useCallback(async () => {
     try {
       const { data } = await apiClient.get<GoogleCalendarStatus>("/api/settings/google-calendar");
-      setStatus(data);
+      setStatus(normalize(data));
       setLoadError("");
     } catch (err) {
       setLoadError(errorText(err, "讀取失敗"));
@@ -61,7 +69,7 @@ export function GoogleCalendarSettings() {
   useEffect(() => {
     let cancelled = false;
     apiClient.get<GoogleCalendarStatus>("/api/settings/google-calendar")
-      .then(({ data }) => { if (!cancelled) setStatus(data); })
+      .then(({ data }) => { if (!cancelled) setStatus(normalize(data)); })
       .catch((err) => { if (!cancelled) setLoadError(errorText(err, "讀取失敗")); });
     return () => { cancelled = true; };
   }, []);
@@ -92,7 +100,7 @@ export function GoogleCalendarSettings() {
       const { data } = await apiClient.post<GoogleCalendarStatus>("/api/settings/google-calendar/credentials", form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      setStatus(data);
+      setStatus(normalize(data));
       setCalendars(null);
       await dialog.success("憑證已加密儲存。接著請按「連結 Google 帳號」");
     } catch (err) {
@@ -131,7 +139,7 @@ export function GoogleCalendarSettings() {
     if (!(await dialog.confirm("中斷與 Google 帳號的連結？已上傳的憑證會保留，之後可以重新連結。"))) return;
     try {
       const { data } = await apiClient.post<GoogleCalendarStatus>("/api/settings/google-calendar/disconnect");
-      setStatus(data);
+      setStatus(normalize(data));
       setCalendars(null);
     } catch (err) {
       await dialog.error(errorText(err, "中斷失敗"));
@@ -171,6 +179,13 @@ export function GoogleCalendarSettings() {
         </p>
 
         {loadError && <div className="alert alert-error text-sm">{loadError}</div>}
+
+        {status && !status.callback_path && (
+          <div className="alert alert-warning text-sm">
+            <AlertTriangle size={16} />
+            <span>{BACKEND_OUTDATED_NOTE}</span>
+          </div>
+        )}
 
         {status && !status.encryption_ready && (
           <div className="alert alert-warning text-sm">
