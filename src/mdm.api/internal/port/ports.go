@@ -251,3 +251,14 @@ type DEPRunResult struct {
 type DEPSchedulerRunner interface {
 	RunOnce(ctx context.Context) DEPRunResult
 }
+
+// GoogleCalendarSettingsRepository persists the Google Calendar connection
+// (single row). It only ever sees ciphertext; encryption happens in the caller.
+type GoogleCalendarSettingsRepository interface {
+	Get(ctx context.Context) (*domain.GoogleCalendarSettings, error)
+	// SaveClient stores a new client ID and encrypted secret. It also clears
+	// any refresh token: a token is only valid for the client that issued it.
+	SaveClient(ctx context.Context, clientID, clientSecretEnc, updatedBy string) error
+	// Clear removes the client and refresh token entirely.
+	Clear(ctx context.Context, updatedBy string) error
+}

@@ -367,7 +367,7 @@ type swagNotificationItem struct {
 // swagExtendReq is the body of POST /api/rentals/{id}/extend.
 type swagExtendReq struct {
 	NewExpectedReturn string `json:"new_expected_return" example:"2026-10-20"` // 新的預計歸還日 (YYYY-MM-DD)，必須晚於目前的預計歸還日
-	Reason            string `json:"reason" example:"出差行程延後"`                // 續借原因（必填）
+	Reason            string `json:"reason" example:"出差行程延後"`                  // 續借原因（必填）
 }
 
 // swagExtensionDecisionReq is the optional body of approve/reject on a

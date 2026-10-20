@@ -103,3 +103,6 @@ var Migration033SQL string
 
 //go:embed migrations/034_rental_extensions.up.sql
 var Migration034SQL string
+
+//go:embed migrations/035_google_calendar_settings.up.sql
+var Migration035SQL string
