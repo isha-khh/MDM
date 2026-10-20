@@ -20,6 +20,8 @@ services:
       MICROMDM_API_KEY: ${MICROMDM_API_KEY}
       WEBSOCKET_URL: ${WEBSOCKET_URL}
       VPP_TOKEN_PATH: ${VPP_TOKEN_PATH:-}
+      # Encrypts secrets kept in the database (Google Calendar, user directory). Required for those settings pages.
+      SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
       LISTEN_ADDR: ":8080"
     restart: unless-stopped
 

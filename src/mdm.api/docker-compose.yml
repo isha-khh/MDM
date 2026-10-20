@@ -21,6 +21,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       MICROMDM_URL: ${MICROMDM_URL}
       MICROMDM_API_KEY: ${MICROMDM_API_KEY}
+      SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
       VPP_TOKEN_PATH: /data/vpp.token
       WEBHOOK_PATH: /webhook
     depends_on:
