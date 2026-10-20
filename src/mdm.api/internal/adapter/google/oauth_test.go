@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestClient(t *testing.T, h http.Handler) *Client {
@@ -202,5 +203,99 @@ func TestRevoke(t *testing.T) {
 	status = 400
 	if err := c.Revoke(context.Background(), "1//R"); err == nil {
 		t.Error("non-200 should be an error")
+	}
+}
+
+func TestListEvents_QueryParsingAndFiltering(t *testing.T) {
+	var gotPath, gotAuth string
+	var gotQuery url.Values
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth, gotQuery = r.URL.EscapedPath(), r.Header.Get("Authorization"), r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
+			{"id": "e1", "status": "confirmed", "summary": "苗栗出差", "description": "地點： 苗栗、台中<br>交通：高鐵", "location": "苗栗縣",
+				"htmlLink": "https://calendar.google.com/e1", "start": map[string]any{"dateTime": "2026-10-20T08:00:00+08:00"}, "end": map[string]any{"dateTime": "2026-10-20T17:00:00+08:00"}},
+			{"id": "e2", "status": "confirmed", "summary": "全天", "start": map[string]any{"date": "2026-10-21"}, "end": map[string]any{"date": "2026-10-22"}},
+			{"id": "e3", "status": "cancelled", "summary": "取消的"},
+		}})
+	}))
+	min := time.Date(2026, 10, 19, 16, 0, 0, 0, time.FixedZone("TPE", 8*3600)) // 08:00 UTC
+	max := min.AddDate(0, 0, 60)
+	evs, err := c.ListEvents(context.Background(), "ya29.T", "6fa1@group.calendar.google.com", min, max)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/calendar/v3/calendars/6fa1@group.calendar.google.com/events" && gotPath != "/calendar/v3/calendars/6fa1%40group.calendar.google.com/events" {
+		t.Errorf("path %q", gotPath)
+	}
+	if gotAuth != "Bearer ya29.T" || gotQuery.Get("singleEvents") != "true" || gotQuery.Get("orderBy") != "startTime" {
+		t.Errorf("auth %q query %v", gotAuth, gotQuery)
+	}
+	if gotQuery.Get("timeMin") != "2026-10-19T08:00:00Z" {
+		t.Errorf("timeMin must be sent as UTC, got %q", gotQuery.Get("timeMin"))
+	}
+	if len(evs) != 2 {
+		t.Fatalf("cancelled events must be dropped; got %+v", evs)
+	}
+	if evs[0].Start != "2026-10-20T08:00:00+08:00" || evs[0].AllDay || evs[0].Location != "苗栗縣" || evs[0].Description == "" {
+		t.Errorf("timed event: %+v", evs[0])
+	}
+	if !evs[1].AllDay || evs[1].Start != "2026-10-21" || evs[1].End != "2026-10-22" {
+		t.Errorf("all-day event: %+v", evs[1])
+	}
+}
+
+func TestListEvents_EscapesCalendarIDInThePath(t *testing.T) {
+	var raw string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw = r.URL.EscapedPath()
+		json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+	}))
+	// An id containing path characters must not be able to reach another endpoint.
+	if _, err := c.ListEvents(context.Background(), "t", "x/../../users/me/calendarList?", time.Now(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(raw, "/../") || strings.HasSuffix(raw, "calendarList") {
+		t.Errorf("calendar id was not escaped: %q", raw)
+	}
+}
+
+func TestListEvents_Paginates(t *testing.T) {
+	calls := 0
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Query().Get("pageToken") == "" {
+			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"id": "a", "start": map[string]any{"date": "2026-10-20"}}}, "nextPageToken": "p2"})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"id": "b", "start": map[string]any{"date": "2026-10-21"}}}})
+	}))
+	evs, err := c.ListEvents(context.Background(), "t", "cal", time.Now(), time.Now())
+	if err != nil || len(evs) != 2 || calls != 2 || evs[1].ID != "b" {
+		t.Errorf("events %+v calls %d err %v", evs, calls, err)
+	}
+}
+
+func TestListEvents_PaginationIsBounded(t *testing.T) {
+	calls := 0
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "nextPageToken": "again"}) // never ends
+	}))
+	if _, err := c.ListEvents(context.Background(), "t", "cal", time.Now(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 8 {
+		t.Errorf("should stop after 8 pages, made %d requests", calls)
+	}
+}
+
+func TestListEvents_NotFoundIsParsed(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": 404, "message": "Not Found", "status": "NOT_FOUND"}})
+	}))
+	_, err := c.ListEvents(context.Background(), "t", "nope", time.Now(), time.Now())
+	if err == nil || !strings.Contains(err.Error(), "NOT_FOUND") {
+		t.Errorf("got %v", err)
 	}
 }

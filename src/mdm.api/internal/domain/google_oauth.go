@@ -19,8 +19,11 @@ type GoogleCalendarSettings struct {
 	// allowed to use one of these.
 	RedirectURIs     []string
 	ConnectedAccount string // the authorised Google account's address, shown in the UI
-	UpdatedAt        time.Time
-	UpdatedBy        *string
+	// SelectedCalendarIDs are the calendars (of the connected account) to read
+	// business trips from.
+	SelectedCalendarIDs []string
+	UpdatedAt           time.Time
+	UpdatedBy           *string
 }
 
 // GoogleCalendarCallbackPath is where Google sends the admin back after they

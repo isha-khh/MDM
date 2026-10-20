@@ -20,11 +20,11 @@ import (
 //	協會人員：張啓瑞 、劉名政
 //	信箱：a@x.org、b@x.org
 type Trip struct {
-	Location  string
-	Time      string
-	Transport string
-	Names     []string
-	Emails    []string
+	Location  string   `json:"location"`
+	Time      string   `json:"time"`
+	Transport string   `json:"transport"`
+	Names     []string `json:"names"`
+	Emails    []string `json:"emails"`
 }
 
 var (

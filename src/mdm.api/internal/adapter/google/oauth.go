@@ -238,3 +238,101 @@ func (c *Client) ListCalendars(ctx context.Context, accessToken string) ([]Calen
 	}
 	return out, nil
 }
+
+// Event is one calendar event, reduced to what the trip-notice job needs.
+// Start/End are kept as Google sent them — RFC 3339 with an offset for timed
+// events, "YYYY-MM-DD" for all-day events (AllDay) — so no time zone is
+// guessed here; whoever interprets them decides which zone's calendar day
+// they mean.
+type Event struct {
+	ID          string `json:"id"`
+	Summary     string `json:"summary"`
+	Description string `json:"description"` // may contain HTML when edited in Google's web UI
+	Location    string `json:"location"`
+	Start       string `json:"start"`
+	End         string `json:"end"`
+	AllDay      bool   `json:"all_day"`
+	HTMLLink    string `json:"html_link"`
+}
+
+// ListEvents returns events overlapping [timeMin, timeMax) from one calendar,
+// recurring events expanded into single instances and ordered by start,
+// following pagination (capped, so a huge calendar can't run away). Cancelled
+// events are dropped.
+func (c *Client) ListEvents(ctx context.Context, accessToken, calendarID string, timeMin, timeMax time.Time) ([]Event, error) {
+	var out []Event
+	pageToken := ""
+	for page := 0; page < 8; page++ {
+		q := url.Values{
+			"singleEvents": {"true"},
+			"orderBy":      {"startTime"},
+			"timeMin":      {timeMin.UTC().Format(time.RFC3339)},
+			"timeMax":      {timeMax.UTC().Format(time.RFC3339)},
+			"maxResults":   {"250"},
+		}
+		if pageToken != "" {
+			q.Set("pageToken", pageToken)
+		}
+		endpoint := c.CalendarAPI + "/calendars/" + url.PathEscape(calendarID) + "/events?" + q.Encode()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, redactTransportErr(err)
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		resp.Body.Close()
+
+		var parsed struct {
+			Items []struct {
+				ID          string `json:"id"`
+				Status      string `json:"status"`
+				Summary     string `json:"summary"`
+				Description string `json:"description"`
+				Location    string `json:"location"`
+				HTMLLink    string `json:"htmlLink"`
+				Start       struct {
+					DateTime string `json:"dateTime"`
+					Date     string `json:"date"`
+				} `json:"start"`
+				End struct {
+					DateTime string `json:"dateTime"`
+					Date     string `json:"date"`
+				} `json:"end"`
+			} `json:"items"`
+			NextPageToken string `json:"nextPageToken"`
+			Error         struct {
+				Message string `json:"message"`
+				Status  string `json:"status"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(body, &parsed)
+		if resp.StatusCode != http.StatusOK {
+			code := parsed.Error.Status
+			if code == "" {
+				code = "http_error"
+			}
+			return nil, &APIError{Status: resp.StatusCode, Code: code, Description: parsed.Error.Message}
+		}
+		for _, it := range parsed.Items {
+			if it.Status == "cancelled" {
+				continue
+			}
+			ev := Event{ID: it.ID, Summary: it.Summary, Description: it.Description, Location: it.Location, HTMLLink: it.HTMLLink}
+			if it.Start.DateTime != "" {
+				ev.Start, ev.End = it.Start.DateTime, it.End.DateTime
+			} else {
+				ev.Start, ev.End, ev.AllDay = it.Start.Date, it.End.Date, true
+			}
+			out = append(out, ev)
+		}
+		if parsed.NextPageToken == "" {
+			return out, nil
+		}
+		pageToken = parsed.NextPageToken
+	}
+	return out, nil
+}

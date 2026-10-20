@@ -29,9 +29,13 @@ func (f *fakeGoogleRepo) Get(context.Context) (*domain.GoogleCalendarSettings, e
 	c := f.s
 	return &c, nil
 }
+func (f *fakeGoogleRepo) SaveSelectedCalendars(_ context.Context, ids []string, by string) error {
+	f.s.SelectedCalendarIDs, f.s.UpdatedBy = ids, &by
+	return nil
+}
 func (f *fakeGoogleRepo) SaveClient(_ context.Context, id, enc string, uris []string, by string) error {
 	f.s.ClientID, f.s.ClientSecretEnc, f.s.RedirectURIs = id, enc, uris
-	f.s.RefreshTokenEnc, f.s.ConnectedAccount = "", ""
+	f.s.RefreshTokenEnc, f.s.ConnectedAccount, f.s.SelectedCalendarIDs = "", "", nil
 	f.s.UpdatedAt, f.s.UpdatedBy = time.Now(), &by
 	return nil
 }
@@ -63,6 +67,11 @@ type fakeGoogle struct {
 	gotRefresh      string
 	listedWith      string
 	revoked         []string
+	events          map[string][]google.Event // by calendar id
+	eventsErr       map[string]error
+	eventCalls      []string
+	eventsFrom      time.Time
+	eventsTo        time.Time
 }
 
 func (f *fakeGoogle) AuthCodeURL(clientID, redirectURI, state string) string {
@@ -82,6 +91,12 @@ func (f *fakeGoogle) RefreshAccessToken(_ context.Context, id, secret, refresh s
 func (f *fakeGoogle) ListCalendars(_ context.Context, access string) ([]google.Calendar, error) {
 	f.listedWith = access
 	return f.calendars, f.listErr
+}
+func (f *fakeGoogle) ListEvents(_ context.Context, access, calendarID string, from, to time.Time) ([]google.Event, error) {
+	f.listedWith = access
+	f.eventCalls = append(f.eventCalls, calendarID)
+	f.eventsFrom, f.eventsTo = from, to
+	return f.events[calendarID], f.eventsErr[calendarID]
 }
 func (f *fakeGoogle) Revoke(_ context.Context, token string) error {
 	f.revoked = append(f.revoked, token)
@@ -296,7 +311,7 @@ func TestStatusAndDelete(t *testing.T) {
 	rec := do(e.mux, "GET", basePath, admin, "", nil)
 	var st googleCalendarStatus
 	json.Unmarshal(rec.Body.Bytes(), &st)
-	if rec.Code != 200 || !st.EncryptionReady || st.HasClientSecret || st.Connected || st.RedirectURIs == nil {
+	if rec.Code != 200 || !st.EncryptionReady || st.HasClientSecret || st.Connected || st.RedirectURIs == nil || st.SelectedCalendarIDs == nil {
 		t.Errorf("fresh state: %d %+v (redirect_uris must be [] not null)", rec.Code, st)
 	}
 
@@ -674,5 +689,247 @@ func TestDisconnect_KeepsCredentialsDropsTokenAndRevokes(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &st)
 	if st.Connected || !st.HasClientSecret {
 		t.Errorf("status after disconnect: %+v", st)
+	}
+}
+
+// ---------------- choosing calendars ----------------
+
+func TestSelectCalendars(t *testing.T) {
+	e := connectedEnv(t)
+	admin := tokenFor(t, "admin", "sys_admin")
+	put := func(body string) *httptest.ResponseRecorder {
+		return do(e.mux, "PUT", basePath+"/calendars", admin, "application/json", []byte(body))
+	}
+
+	rec := put(`{"calendar_ids":[" bip@group ","ida@group","bip@group","","  "]}`)
+	if rec.Code != 200 {
+		t.Fatalf("status %d %s", rec.Code, rec.Body)
+	}
+	if got := strings.Join(e.repo.s.SelectedCalendarIDs, ","); got != "bip@group,ida@group" {
+		t.Errorf("trimmed, de-duplicated, order kept: %q", got)
+	}
+	var st googleCalendarStatus
+	json.Unmarshal(rec.Body.Bytes(), &st)
+	if len(st.SelectedCalendarIDs) != 2 {
+		t.Errorf("status should echo the selection: %+v", st)
+	}
+
+	if rec := put(`{"calendar_ids":[]}`); rec.Code != 200 || len(e.repo.s.SelectedCalendarIDs) != 0 {
+		t.Errorf("clearing the selection: %d %v", rec.Code, e.repo.s.SelectedCalendarIDs)
+	}
+
+	tooMany := make([]string, 21)
+	for i := range tooMany {
+		tooMany[i] = "cal-" + string(rune('a'+i))
+	}
+	b, _ := json.Marshal(map[string]any{"calendar_ids": tooMany})
+	if rec := put(string(b)); rec.Code != 400 {
+		t.Errorf("21 calendars: status %d", rec.Code)
+	}
+	if rec := put(`{"calendar_ids":["` + strings.Repeat("x", 301) + `"]}`); rec.Code != 400 {
+		t.Errorf("overlong id: status %d", rec.Code)
+	}
+	if rec := put(`nope`); rec.Code != 400 {
+		t.Errorf("bad body: status %d", rec.Code)
+	}
+}
+
+func TestSelectCalendars_NeedsAConnectionAndAdmin(t *testing.T) {
+	e := newEnv(t, validKey())
+	e.uploadCreds(t) // credentials but no authorised account
+	if rec := do(e.mux, "PUT", basePath+"/calendars", tokenFor(t, "admin", "sys_admin"), "application/json", []byte(`{"calendar_ids":["a"]}`)); rec.Code != 400 {
+		t.Errorf("not connected: status %d", rec.Code)
+	}
+	e = connectedEnv(t)
+	if rec := do(e.mux, "PUT", basePath+"/calendars", tokenFor(t, "user", ""), "application/json", []byte(`{"calendar_ids":["a"]}`)); rec.Code != 401 {
+		t.Errorf("ordinary user: status %d", rec.Code)
+	}
+	if len(e.repo.s.SelectedCalendarIDs) != 0 {
+		t.Error("an unauthorised request changed the selection")
+	}
+	if rec := do(e.mux, "GET", basePath+"/calendars", tokenFor(t, "admin", "sys_admin"), "", nil); rec.Code != 405 {
+		t.Errorf("GET: status %d, want 405", rec.Code)
+	}
+}
+
+// ---------------- previewing events ----------------
+
+type previewResp struct {
+	Days      int `json:"days"`
+	Calendars []struct {
+		ID, Summary string
+		Count       int
+		Error       string
+	} `json:"calendars"`
+	Events []struct {
+		ID              string `json:"id"`
+		Summary         string `json:"summary"`
+		Start           string `json:"start"`
+		CalendarSummary string `json:"calendar_summary"`
+		Trip            struct {
+			Location string   `json:"location"`
+			Names    []string `json:"names"`
+			Emails   []string `json:"emails"`
+		} `json:"trip"`
+		LocationUsed   string `json:"location_used"`
+		LocationSource string `json:"location_source"`
+		TargetLocation bool   `json:"target_location"`
+	} `json:"events"`
+}
+
+func previewEnv(t *testing.T) *env {
+	t.Helper()
+	e := connectedEnv(t)
+	e.repo.s.SelectedCalendarIDs = []string{"bip@group", "ida@group"}
+	e.g.calendars = []google.Calendar{{ID: "bip@group", Summary: "ISHA高雄-園管局BIP計畫"}, {ID: "ida@group", Summary: "ISHA高雄-IDA P70計畫"}, {ID: "other@group", Summary: "not selected"}}
+	e.g.events = map[string][]google.Event{
+		"bip@group": {
+			// the sample from the business: Miaoli/Taichung is not a target
+			{ID: "e-miaoli", Summary: "苗栗出差", Start: "2026-10-28T08:00:00+08:00", Description: "地點： 苗栗、台中\n時間：08:00-17:00\n交通：高鐵＋租車\n協會人員：張啓瑞 、劉名政\n信箱：leonchang@mail.isha.org.tw、foylaou0326@mail.isha.org.tw"},
+			// Google's web editor saves HTML
+			{ID: "e-khh", Summary: "高雄廠區訪視", Start: "2026-10-22T08:00:00+08:00", Description: "<b>地點：</b>高雄、屏東<br>協會人員：吳宜蓁<br>信箱：idsl5397@mail.isha.org.tw"},
+		},
+		"ida@group": {
+			// no 地點 line, but the event's own location field names a target county
+			{ID: "e-loc", Summary: "台南會議", Start: "2026-10-21", AllDay: true, Location: "台南市中西區", Description: "只是備註，沒有標籤"},
+			{ID: "e-none", Summary: "內部會議", Start: "2026-10-25T10:00:00+08:00"},
+		},
+	}
+	return e
+}
+
+func TestPreview_ParsesEventsAndFlagsTargets(t *testing.T) {
+	e := previewEnv(t)
+	rec := do(e.mux, "GET", basePath+"/events", tokenFor(t, "admin", "sys_admin"), "", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status %d %s", rec.Code, rec.Body)
+	}
+	var out previewResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Days != 60 || len(out.Calendars) != 2 || len(out.Events) != 4 {
+		t.Fatalf("days=%d calendars=%d events=%d", out.Days, len(out.Calendars), len(out.Events))
+	}
+	if out.Calendars[0].Summary != "ISHA高雄-園管局BIP計畫" || out.Calendars[0].Count != 2 {
+		t.Errorf("calendar summary: %+v", out.Calendars[0])
+	}
+
+	// Ordered by start across calendars: Oct 21 (all-day), 22, 25, 28.
+	order := []string{}
+	byID := map[string]int{}
+	for i, ev := range out.Events {
+		order = append(order, ev.ID)
+		byID[ev.ID] = i
+	}
+	if strings.Join(order, ",") != "e-loc,e-khh,e-none,e-miaoli" {
+		t.Errorf("order: %v", order)
+	}
+
+	miaoli := out.Events[byID["e-miaoli"]]
+	if miaoli.TargetLocation || miaoli.LocationSource != "description" || miaoli.Trip.Location != "苗栗、台中" ||
+		strings.Join(miaoli.Trip.Names, "|") != "張啓瑞|劉名政" || len(miaoli.Trip.Emails) != 2 || miaoli.CalendarSummary != "ISHA高雄-園管局BIP計畫" {
+		t.Errorf("the sample trip should parse but NOT be a target: %+v", miaoli)
+	}
+	khh := out.Events[byID["e-khh"]]
+	if !khh.TargetLocation || khh.Trip.Location != "高雄、屏東" || len(khh.Trip.Emails) != 1 {
+		t.Errorf("HTML description / target county: %+v", khh)
+	}
+	loc := out.Events[byID["e-loc"]]
+	if !loc.TargetLocation || loc.LocationSource != "event" || loc.LocationUsed != "台南市中西區" || loc.Trip.Names == nil {
+		t.Errorf("fallback to the event's location field: %+v", loc)
+	}
+	none := out.Events[byID["e-none"]]
+	if none.TargetLocation || none.LocationSource != "" || none.Trip.Emails == nil || none.Trip.Names == nil {
+		t.Errorf("event with nothing to parse (lists must be [] not null): %+v", none)
+	}
+}
+
+func TestPreview_OnlyReadsSelectedCalendarsInTheRightWindow(t *testing.T) {
+	e := previewEnv(t)
+	rec := do(e.mux, "GET", basePath+"/events?days=30", tokenFor(t, "admin", "sys_admin"), "", nil)
+	if rec.Code != 200 {
+		t.Fatal(rec.Body.String())
+	}
+	if strings.Join(e.g.eventCalls, ",") != "bip@group,ida@group" {
+		t.Errorf("must read exactly the selected calendars, got %v", e.g.eventCalls)
+	}
+	if want := e.now.Add(-24 * time.Hour); !e.g.eventsFrom.Equal(want) {
+		t.Errorf("window should start a day back so an ongoing trip shows: from %v want %v", e.g.eventsFrom, want)
+	}
+	if want := e.now.AddDate(0, 0, 30); !e.g.eventsTo.Equal(want) {
+		t.Errorf("window end: %v want %v", e.g.eventsTo, want)
+	}
+	if e.g.listedWith != "ya29.ACCESS" {
+		t.Errorf("used token %q", e.g.listedWith)
+	}
+	for _, leak := range []string{"TOPSECRET", "1//REFRESH", "ya29"} {
+		if strings.Contains(rec.Body.String(), leak) {
+			t.Errorf("response leaks %q", leak)
+		}
+	}
+}
+
+func TestPreview_OneCalendarFailingDoesNotHideTheOthers(t *testing.T) {
+	e := previewEnv(t)
+	e.g.eventsErr = map[string]error{"bip@group": &google.APIError{Status: 404, Code: "NOT_FOUND", Description: "Not Found"}}
+	e.g.events["bip@group"] = nil
+	rec := do(e.mux, "GET", basePath+"/events", tokenFor(t, "admin", "sys_admin"), "", nil)
+	var out previewResp
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if rec.Code != 200 || out.Calendars[0].Error == "" || out.Calendars[1].Error != "" || len(out.Events) != 2 {
+		t.Errorf("status %d calendars %+v events %d", rec.Code, out.Calendars, len(out.Events))
+	}
+}
+
+func TestPreview_LongDescriptionsAreTruncated(t *testing.T) {
+	e := previewEnv(t)
+	e.g.events = map[string][]google.Event{"bip@group": {{ID: "big", Start: "2026-10-22", AllDay: true, Description: "地點：高雄\n" + strings.Repeat("字", 9000)}}}
+	rec := do(e.mux, "GET", basePath+"/events", tokenFor(t, "admin", "sys_admin"), "", nil)
+	var raw struct {
+		Events []struct {
+			Description string `json:"description"`
+			Truncated   bool   `json:"description_truncated"`
+			Target      bool   `json:"target_location"`
+		} `json:"events"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &raw)
+	if len(raw.Events) != 1 || !raw.Events[0].Truncated || len([]rune(raw.Events[0].Description)) != 4000 || !raw.Events[0].Target {
+		t.Errorf("should truncate only the displayed text, still parse the rest: %+v", raw.Events)
+	}
+}
+
+func TestPreview_Rejections(t *testing.T) {
+	admin := tokenFor(t, "admin", "sys_admin")
+
+	e := connectedEnv(t) // connected, but no calendar chosen yet
+	if rec := do(e.mux, "GET", basePath+"/events", admin, "", nil); rec.Code != 400 || !strings.Contains(rec.Body.String(), "選擇") {
+		t.Errorf("no selection: %d %s", rec.Code, rec.Body)
+	}
+	e = previewEnv(t)
+	for _, q := range []string{"days=0", "days=-3", "days=367", "days=abc"} {
+		if rec := do(e.mux, "GET", basePath+"/events?"+q, admin, "", nil); rec.Code != 400 {
+			t.Errorf("%s: status %d, want 400", q, rec.Code)
+		}
+	}
+	if len(e.g.eventCalls) != 0 {
+		t.Error("an invalid request must not reach Google")
+	}
+	if rec := do(e.mux, "GET", basePath+"/events", tokenFor(t, "user", ""), "", nil); rec.Code != 401 {
+		t.Errorf("ordinary user: status %d", rec.Code)
+	}
+	e.g.refreshErr = &google.APIError{Status: 400, Code: "invalid_grant"}
+	if rec := do(e.mux, "GET", basePath+"/events", admin, "", nil); rec.Code != 409 || !strings.Contains(rec.Body.String(), "重新連結") {
+		t.Errorf("revoked token: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCleanCalendarIDs(t *testing.T) {
+	got, err := cleanCalendarIDs([]string{"a", " b ", "a", "", "c"})
+	if err != nil || strings.Join(got, ",") != "a,b,c" {
+		t.Errorf("got %v, %v", got, err)
+	}
+	if got, _ := cleanCalendarIDs(nil); got == nil || len(got) != 0 {
+		t.Errorf("nil input should give an empty, non-nil slice, got %#v", got)
 	}
 }

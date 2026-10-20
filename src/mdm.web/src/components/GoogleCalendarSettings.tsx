@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Calendar, Upload, Link2, Unlink, PlugZap, Trash2, AlertTriangle, CheckCircle2, Copy } from "lucide-react";
+import { Calendar, Upload, Link2, Unlink, PlugZap, Trash2, AlertTriangle, CheckCircle2, Copy, Eye, Save } from "lucide-react";
 import apiClient from "../lib/apiClient";
 import { useDialog } from "./DialogProvider";
 
@@ -12,7 +12,33 @@ interface GoogleCalendarStatus {
   callback_path: string;
   connected: boolean;
   connected_account?: string;
+  selected_calendar_ids: string[];
   updated_at?: string;
+}
+
+interface PreviewEvent {
+  id: string;
+  summary: string;
+  description: string;
+  description_truncated?: boolean;
+  location: string;
+  start: string;
+  end: string;
+  all_day: boolean;
+  html_link: string;
+  calendar_id: string;
+  calendar_summary: string;
+  trip: { location: string; time: string; transport: string; names: string[]; emails: string[] };
+  location_used: string;
+  location_source: "description" | "event" | "";
+  target_location: boolean;
+}
+
+interface Preview {
+  days: number;
+  targets: string[];
+  calendars: { id: string; summary: string; count: number; error?: string }[];
+  events: PreviewEvent[];
 }
 
 interface CalendarInfo {
@@ -34,7 +60,7 @@ const ROLE_LABELS: Record<string, string> = {
 // rather than crashing.
 const BACKEND_OUTDATED_NOTE = "後端還是舊版本（缺少授權流程的功能），請重啟後端後重新整理頁面";
 function normalize(data: GoogleCalendarStatus): GoogleCalendarStatus {
-  return { ...data, redirect_uris: data.redirect_uris ?? [] };
+  return { ...data, redirect_uris: data.redirect_uris ?? [], selected_calendar_ids: data.selected_calendar_ids ?? [] };
 }
 
 function errorText(err: unknown, fallback: string): string {
@@ -54,6 +80,11 @@ export function GoogleCalendarSettings() {
   const [connecting, setConnecting] = useState(false);
   const [testing, setTesting] = useState(false);
   const [calendars, setCalendars] = useState<CalendarInfo[] | null>(null);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [savingPick, setSavingPick] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [onlyTargets, setOnlyTargets] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -128,10 +159,39 @@ export function GoogleCalendarSettings() {
     try {
       const { data } = await apiClient.post<{ calendars: CalendarInfo[] }>("/api/settings/google-calendar/test");
       setCalendars(data.calendars);
+      setPicked(new Set(status?.selected_calendar_ids ?? []));
     } catch (err) {
       await dialog.error(errorText(err, "測試連線失敗"));
     } finally {
       setTesting(false);
+    }
+  };
+
+  const togglePick = (id: string) =>
+    setPicked((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+
+  const savePick = async () => {
+    setSavingPick(true);
+    try {
+      const { data } = await apiClient.put<GoogleCalendarStatus>("/api/settings/google-calendar/calendars", { calendar_ids: [...picked] });
+      setStatus(normalize(data));
+      setPreview(null);
+    } catch (err) {
+      await dialog.error("儲存失敗：" + errorText(err, ""));
+    } finally {
+      setSavingPick(false);
+    }
+  };
+
+  const loadPreview = async () => {
+    setPreviewing(true);
+    try {
+      const { data } = await apiClient.get<Preview>("/api/settings/google-calendar/events");
+      setPreview(data);
+    } catch (err) {
+      await dialog.error(errorText(err, "讀取活動失敗"));
+    } finally {
+      setPreviewing(false);
     }
   };
 
@@ -141,6 +201,7 @@ export function GoogleCalendarSettings() {
       const { data } = await apiClient.post<GoogleCalendarStatus>("/api/settings/google-calendar/disconnect");
       setStatus(normalize(data));
       setCalendars(null);
+      setPreview(null);
     } catch (err) {
       await dialog.error(errorText(err, "中斷失敗"));
     }
@@ -151,6 +212,7 @@ export function GoogleCalendarSettings() {
     try {
       await apiClient.delete("/api/settings/google-calendar");
       setCalendars(null);
+      setPreview(null);
       await load();
     } catch (err) {
       await dialog.error(errorText(err, "移除失敗"));
@@ -257,11 +319,11 @@ export function GoogleCalendarSettings() {
 
             {/* Step 3 */}
             <section className="space-y-2">
-              <h3 className="font-medium text-sm">③ 測試連線</h3>
+              <h3 className="font-medium text-sm">③ 選擇要讀取的日曆</h3>
               <div className="flex flex-wrap gap-2">
                 <button className="btn btn-sm btn-outline gap-1" disabled={testing || !status.connected} onClick={test}>
                   {testing ? <span className="loading loading-spinner loading-xs" /> : <PlugZap size={14} />}
-                  列出可讀取的日曆
+                  {calendars ? "重新列出日曆" : "列出可讀取的日曆"}
                 </button>
                 {status.connected && (
                   <button className="btn btn-sm btn-ghost gap-1" onClick={disconnect}><Unlink size={14} /> 中斷連結</button>
@@ -275,21 +337,102 @@ export function GoogleCalendarSettings() {
                 calendars.length === 0
                   ? <p className="text-sm text-base-content/60">這個帳號沒有任何可讀取的日曆。</p>
                   : (
-                    <div className="overflow-x-auto">
-                      <table className="table table-sm">
-                        <thead><tr><th>名稱</th><th>日曆 ID</th><th>權限</th></tr></thead>
-                        <tbody>
-                          {calendars.map((c) => (
-                            <tr key={c.id}>
-                              <td>{c.summary}{c.primary && <span className="badge badge-xs badge-outline ml-1">主要</span>}</td>
-                              <td className="font-mono text-xs break-all">{c.id}</td>
-                              <td>{ROLE_LABELS[c.access_role] || c.access_role}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                    <div className="space-y-2">
+                      <p className="text-xs text-base-content/50">勾選要讀取出差行程的日曆（可複選），再按「儲存選擇」。</p>
+                      <div className="overflow-x-auto">
+                        <table className="table table-sm">
+                          <thead><tr><th></th><th>名稱</th><th>日曆 ID</th><th>權限</th></tr></thead>
+                          <tbody>
+                            {calendars.map((c) => (
+                              <tr key={c.id} className="hover cursor-pointer" onClick={() => togglePick(c.id)}>
+                                <td><input type="checkbox" className="checkbox checkbox-sm" checked={picked.has(c.id)} onChange={() => togglePick(c.id)} onClick={(e) => e.stopPropagation()} /></td>
+                                <td>{c.summary}{c.primary && <span className="badge badge-xs badge-outline ml-1">主要</span>}</td>
+                                <td className="font-mono text-xs break-all">{c.id}</td>
+                                <td>{ROLE_LABELS[c.access_role] || c.access_role}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <button className="btn btn-sm btn-primary gap-1" disabled={savingPick} onClick={savePick}>
+                        {savingPick ? <span className="loading loading-spinner loading-xs" /> : <Save size={14} />}
+                        儲存選擇（{picked.size} 個）
+                      </button>
                     </div>
                   )
+              )}
+            </section>
+
+            {/* Step 4 */}
+            <section className="space-y-2">
+              <h3 className="font-medium text-sm">④ 預覽活動與解析結果</h3>
+              <p className="text-xs text-base-content/50">
+                讀取已選日曆未來 60 天的活動，顯示說明欄解析出的地點／人員／信箱，以及地點是否屬於需要借車的縣市
+                {preview ? `（${preview.targets.join("、")}）` : "（台南、高雄、屏東）"}。只讀取，不會寄信也不會寫入任何資料。
+              </p>
+              <div className="flex flex-wrap items-center gap-3">
+                <button className="btn btn-sm btn-outline gap-1" disabled={previewing || !status.connected || status.selected_calendar_ids.length === 0} onClick={loadPreview}>
+                  {previewing ? <span className="loading loading-spinner loading-xs" /> : <Eye size={14} />}
+                  預覽活動
+                </button>
+                {status.connected && status.selected_calendar_ids.length === 0 && (
+                  <span className="text-xs text-base-content/50">先在上一步選擇並儲存要讀取的日曆</span>
+                )}
+                {preview && (
+                  <label className="label cursor-pointer gap-2 p-0">
+                    <input type="checkbox" className="checkbox checkbox-xs" checked={onlyTargets} onChange={(e) => setOnlyTargets(e.target.checked)} />
+                    <span className="label-text text-xs">只看符合地點的</span>
+                  </label>
+                )}
+              </div>
+
+              {preview && (
+                <div className="space-y-2">
+                  {preview.calendars.map((c) => (
+                    <div key={c.id} className="text-xs">
+                      <span className="font-medium">{c.summary}</span>：
+                      {c.error ? <span className="text-error">{c.error}</span> : <span className="opacity-70">{c.count} 筆活動</span>}
+                    </div>
+                  ))}
+                  {(() => {
+                    const rows = preview.events.filter((ev) => !onlyTargets || ev.target_location);
+                    if (rows.length === 0) return <p className="text-sm text-base-content/60">沒有符合的活動。</p>;
+                    return (
+                      <div className="space-y-2">
+                        {rows.map((ev) => (
+                          <details key={ev.calendar_id + ev.id} className="rounded-lg border border-base-300">
+                            <summary className="cursor-pointer p-2 text-sm flex flex-wrap items-center gap-2">
+                              <span className="font-mono text-xs opacity-70">{ev.all_day ? ev.start : ev.start.replace("T", " ").slice(0, 16)}</span>
+                              <span className="font-medium">{ev.summary || "（無標題）"}</span>
+                              {ev.target_location
+                                ? <span className="badge badge-success badge-sm">符合地點</span>
+                                : <span className="badge badge-ghost badge-sm">{ev.location_used ? "不符合" : "沒有地點"}</span>}
+                              {ev.trip.emails.length + ev.trip.names.length > 0 && (
+                                <span className="text-xs opacity-60">{ev.trip.names.length} 人／{ev.trip.emails.length} 信箱</span>
+                              )}
+                              <span className="text-xs opacity-50 ml-auto">{ev.calendar_summary}</span>
+                            </summary>
+                            <div className="p-3 border-t border-base-300 text-xs space-y-2">
+                              <dl className="grid grid-cols-[5rem_1fr] gap-x-2 gap-y-1">
+                                <dt className="opacity-60">判斷地點</dt>
+                                <dd>{ev.location_used || "—"}{ev.location_source && <span className="opacity-50">（來自{ev.location_source === "description" ? "說明欄「地點：」" : "活動的地點欄位"}）</span>}</dd>
+                                <dt className="opacity-60">時間</dt><dd>{ev.trip.time || "—"}</dd>
+                                <dt className="opacity-60">交通</dt><dd>{ev.trip.transport || "—"}</dd>
+                                <dt className="opacity-60">協會人員</dt><dd>{ev.trip.names.join("、") || "—"}</dd>
+                                <dt className="opacity-60">信箱</dt><dd className="break-all">{ev.trip.emails.join("、") || "—"}</dd>
+                              </dl>
+                              <div>
+                                <div className="opacity-60 mb-1">說明欄原文{ev.description_truncated && "（已截斷）"}</div>
+                                <pre className="whitespace-pre-wrap break-words bg-base-200 rounded p-2 max-h-48 overflow-auto">{ev.description || "（空白）"}</pre>
+                              </div>
+                              {ev.html_link && <a className="link link-primary" href={ev.html_link} target="_blank" rel="noreferrer">在 Google 日曆開啟</a>}
+                            </div>
+                          </details>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
               )}
             </section>
           </div>

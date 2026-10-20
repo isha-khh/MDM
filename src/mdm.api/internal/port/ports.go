@@ -262,6 +262,8 @@ type GoogleCalendarSettingsRepository interface {
 	SaveClient(ctx context.Context, clientID, clientSecretEnc string, redirectURIs []string, updatedBy string) error
 	// SaveRefreshToken records a completed authorisation.
 	SaveRefreshToken(ctx context.Context, refreshTokenEnc, connectedAccount, updatedBy string) error
+	// SaveSelectedCalendars sets which calendars to read events from.
+	SaveSelectedCalendars(ctx context.Context, calendarIDs []string, updatedBy string) error
 	// ClearRefreshToken disconnects the account but keeps the client credentials.
 	ClearRefreshToken(ctx context.Context, updatedBy string) error
 	// Clear removes the client, token and account entirely.

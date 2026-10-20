@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 	"github.com/anthropics/mdm-server/internal/middleware"
 	"github.com/anthropics/mdm-server/internal/port"
 	"github.com/anthropics/mdm-server/internal/secretbox"
+	"github.com/anthropics/mdm-server/internal/service/tripcar"
 )
 
 // Purposes bind each ciphertext to what it is for (see secretbox).
@@ -39,6 +43,7 @@ type googleAPI interface {
 	ExchangeCode(ctx context.Context, clientID, clientSecret, code, redirectURI string) (*google.Token, error)
 	RefreshAccessToken(ctx context.Context, clientID, clientSecret, refreshToken string) (string, error)
 	ListCalendars(ctx context.Context, accessToken string) ([]google.Calendar, error)
+	ListEvents(ctx context.Context, accessToken, calendarID string, timeMin, timeMax time.Time) ([]google.Event, error)
 	Revoke(ctx context.Context, token string) error
 }
 
@@ -82,6 +87,8 @@ func (c *GoogleCalendarController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/google-calendar/connect", c.handleConnect)
 	mux.HandleFunc(domain.GoogleCalendarCallbackPath, c.handleCallback)
 	mux.HandleFunc("/api/settings/google-calendar/test", c.handleTest)
+	mux.HandleFunc("/api/settings/google-calendar/calendars", c.handleSelectCalendars)
+	mux.HandleFunc("/api/settings/google-calendar/events", c.handleEventsPreview)
 	mux.HandleFunc("/api/settings/google-calendar/disconnect", c.handleDisconnect)
 }
 
@@ -95,24 +102,29 @@ type googleCalendarStatus struct {
 	RedirectURIs []string `json:"redirect_uris"`
 	CallbackPath string   `json:"callback_path"`
 	// Connected means a Google account has been authorised (a refresh token is stored).
-	Connected        bool   `json:"connected"`
-	ConnectedAccount string `json:"connected_account,omitempty"`
-	UpdatedAt        string `json:"updated_at,omitempty"`
+	Connected           bool     `json:"connected"`
+	ConnectedAccount    string   `json:"connected_account,omitempty"`
+	SelectedCalendarIDs []string `json:"selected_calendar_ids"`
+	UpdatedAt           string   `json:"updated_at,omitempty"`
 }
 
 func (c *GoogleCalendarController) status(s *domain.GoogleCalendarSettings) googleCalendarStatus {
 	out := googleCalendarStatus{
-		EncryptionReady:  c.box != nil,
-		EncryptionError:  c.boxErr,
-		ClientID:         s.ClientID,
-		HasClientSecret:  s.ClientSecretEnc != "",
-		RedirectURIs:     s.RedirectURIs,
-		CallbackPath:     domain.GoogleCalendarCallbackPath,
-		Connected:        s.RefreshTokenEnc != "",
-		ConnectedAccount: s.ConnectedAccount,
+		EncryptionReady:     c.box != nil,
+		EncryptionError:     c.boxErr,
+		ClientID:            s.ClientID,
+		HasClientSecret:     s.ClientSecretEnc != "",
+		RedirectURIs:        s.RedirectURIs,
+		CallbackPath:        domain.GoogleCalendarCallbackPath,
+		Connected:           s.RefreshTokenEnc != "",
+		ConnectedAccount:    s.ConnectedAccount,
+		SelectedCalendarIDs: s.SelectedCalendarIDs,
 	}
 	if out.RedirectURIs == nil {
 		out.RedirectURIs = []string{}
+	}
+	if out.SelectedCalendarIDs == nil {
+		out.SelectedCalendarIDs = []string{}
 	}
 	if !s.UpdatedAt.IsZero() {
 		out.UpdatedAt = s.UpdatedAt.Format(time.RFC3339)
@@ -577,4 +589,231 @@ func (c *GoogleCalendarController) handleDisconnect(w http.ResponseWriter, r *ht
 		return
 	}
 	writeJSON(w, c.status(s))
+}
+
+// --- choosing calendars and previewing their events ---
+
+const (
+	maxSelectedCalendars = 20
+	maxCalendarIDLen     = 300
+	defaultPreviewDays   = 60
+	maxPreviewDays       = 366
+	maxDescriptionChars  = 4000
+)
+
+// cleanCalendarIDs trims, drops blanks and duplicates (keeping first-seen
+// order), and enforces sane limits so the setting can't be filled with junk.
+func cleanCalendarIDs(in []string) ([]string, error) {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, id := range in {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		if len(id) > maxCalendarIDLen {
+			return nil, errors.New("日曆 ID 太長")
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	if len(out) > maxSelectedCalendars {
+		return nil, fmt.Errorf("最多只能選 %d 個日曆", maxSelectedCalendars)
+	}
+	return out, nil
+}
+
+// handleSelectCalendars godoc
+// @Summary 設定要讀取哪些日曆（sys_admin）
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Router /api/settings/google-calendar/calendars [put]
+func (c *GoogleCalendarController) handleSelectCalendars(w http.ResponseWriter, r *http.Request) {
+	claims, err := c.auth.RequireSysAdmin(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if !requireMethod(w, r, http.MethodPut) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	var body struct {
+		CalendarIDs []string `json:"calendar_ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	ids, err := cleanCalendarIDs(body.CalendarIDs)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s, err := c.repo.Get(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if s.RefreshTokenEnc == "" {
+		writeError(w, http.StatusBadRequest, "尚未連結 Google 帳號")
+		return
+	}
+	if err := c.repo.SaveSelectedCalendars(r.Context(), ids, claims.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.SelectedCalendarIDs = ids
+	writeJSON(w, c.status(s))
+}
+
+type previewEvent struct {
+	google.Event
+	CalendarID      string       `json:"calendar_id"`
+	CalendarSummary string       `json:"calendar_summary"`
+	Trip            tripcar.Trip `json:"trip"`
+	// LocationUsed is what the destination check looked at: the "地點："line in
+	// the description if there is one, otherwise the event's own location field.
+	LocationUsed   string `json:"location_used"`
+	LocationSource string `json:"location_source"` // "description", "event" or ""
+	TargetLocation bool   `json:"target_location"`
+	Truncated      bool   `json:"description_truncated,omitempty"`
+}
+
+type previewCalendar struct {
+	ID      string `json:"id"`
+	Summary string `json:"summary"`
+	Count   int    `json:"count"`
+	Error   string `json:"error,omitempty"`
+}
+
+func buildPreviewEvent(cal google.Calendar, ev google.Event) previewEvent {
+	trip := tripcar.ParseDescription(ev.Description)
+	if trip.Names == nil {
+		trip.Names = []string{}
+	}
+	if trip.Emails == nil {
+		trip.Emails = []string{}
+	}
+	p := previewEvent{Event: ev, CalendarID: cal.ID, CalendarSummary: cal.Summary, Trip: trip}
+	switch {
+	case trip.Location != "":
+		p.LocationUsed, p.LocationSource = trip.Location, "description"
+	case strings.TrimSpace(ev.Location) != "":
+		p.LocationUsed, p.LocationSource = strings.TrimSpace(ev.Location), "event"
+	}
+	p.TargetLocation = tripcar.LocationMatches(p.LocationUsed, tripcar.DefaultTargetCounties)
+	if r := []rune(p.Description); len(r) > maxDescriptionChars {
+		p.Description, p.Truncated = string(r[:maxDescriptionChars]), true
+	}
+	return p
+}
+
+// startTime orders events for display. All-day events carry only a date; it
+// is read as UTC midnight, which is only used to put days in order.
+func startTime(ev google.Event) time.Time {
+	if t, err := time.Parse(time.RFC3339, ev.Start); err == nil {
+		return t
+	}
+	t, _ := time.Parse("2006-01-02", ev.Start)
+	return t
+}
+
+// handleEventsPreview godoc
+// @Summary 預覽已選日曆的近期活動，並顯示說明欄的解析結果（sys_admin，唯讀）
+// @Description 用來驗證實際活動說明欄的格式與解析規則對不對得上；不會寄信、不會寫入任何東西。
+// @Tags Settings
+// @Produce json
+// @Security BearerAuth
+// @Param days query int false "往後看幾天（預設 60，最多 366）"
+// @Router /api/settings/google-calendar/events [get]
+func (c *GoogleCalendarController) handleEventsPreview(w http.ResponseWriter, r *http.Request) {
+	if _, err := c.auth.RequireSysAdmin(r); err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	days := defaultPreviewDays
+	if v := r.URL.Query().Get("days"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxPreviewDays {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("days 需介於 1 到 %d", maxPreviewDays))
+			return
+		}
+		days = n
+	}
+
+	s, err := c.repo.Get(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(s.SelectedCalendarIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "請先選擇要讀取的日曆")
+		return
+	}
+	secret, err := c.clientSecret(s)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	refresh, err := c.refreshToken(s)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	access, err := c.google.RefreshAccessToken(r.Context(), s.ClientID, secret, refresh)
+	if err != nil {
+		log.Printf("[google-calendar] preview: token refresh failed: %v", err)
+		status := http.StatusBadGateway
+		if google.IsInvalidGrant(err) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, googleErrText(err))
+		return
+	}
+	// Names come from the calendar list; a selected id that's no longer on it
+	// still gets queried (and will report its own error).
+	names := map[string]google.Calendar{}
+	if all, err := c.google.ListCalendars(r.Context(), access); err == nil {
+		for _, cal := range all {
+			names[cal.ID] = cal
+		}
+	}
+
+	now := c.now()
+	from, to := now.Add(-24*time.Hour), now.AddDate(0, 0, days) // yesterday on, so a trip already under way still shows
+	cals := make([]previewCalendar, 0, len(s.SelectedCalendarIDs))
+	events := []previewEvent{}
+	for _, id := range s.SelectedCalendarIDs {
+		cal, ok := names[id]
+		if !ok {
+			cal = google.Calendar{ID: id, Summary: id}
+		}
+		evs, err := c.google.ListEvents(r.Context(), access, id, from, to)
+		pc := previewCalendar{ID: id, Summary: cal.Summary, Count: len(evs)}
+		if err != nil {
+			log.Printf("[google-calendar] preview: reading calendar failed: %v", err)
+			pc.Error = googleErrText(err)
+		}
+		cals = append(cals, pc)
+		for _, ev := range evs {
+			events = append(events, buildPreviewEvent(cal, ev))
+		}
+	}
+	sort.SliceStable(events, func(i, j int) bool { return startTime(events[i].Event).Before(startTime(events[j].Event)) })
+
+	writeJSON(w, map[string]interface{}{
+		"days":      days,
+		"targets":   tripcar.DefaultTargetCounties,
+		"calendars": cals,
+		"events":    events,
+	})
 }
