@@ -127,20 +127,34 @@ func Evaluate(t Trip, users []User, targets []string) Result {
 	res := Result{Applicable: true}
 	seen := map[string]bool{}
 
-	for _, email := range t.Emails {
+	// The template lists names and mailboxes in the same order, so when both
+	// lists have the same length they are read as pairs and the mailbox alone
+	// decides who the person is; the name is only a label. Two people with the
+	// same name are told apart by their mailboxes, and a mailbox the directory
+	// doesn't know is reported as not found rather than guessed from the name.
+	paired := len(t.Names) > 0 && len(t.Names) == len(t.Emails)
+
+	for i, email := range t.Emails {
+		name := ""
+		if paired {
+			name = t.Names[i]
+		}
 		u := findByMail(users, email)
 		if u == nil {
-			res.Candidates = append(res.Candidates, Candidate{Email: email, Decision: Unmatched})
+			res.Candidates = append(res.Candidates, Candidate{Name: name, Email: email, Decision: Unmatched})
 			continue
 		}
 		if seen[u.SamAccountName] {
 			continue
 		}
 		seen[u.SamAccountName] = true
-		res.Candidates = append(res.Candidates, Candidate{Email: email, User: u, Decision: decide(u)})
+		res.Candidates = append(res.Candidates, Candidate{Name: name, Email: email, User: u, Decision: decide(u)})
 	}
 
 	for _, name := range t.Names {
+		if paired {
+			break
+		}
 		matches := findByName(users, name)
 		covered := false
 		for _, m := range matches {
@@ -164,6 +178,14 @@ func Evaluate(t Trip, users []User, targets []string) Result {
 		}
 	}
 	return res
+}
+
+// PairingProblem reports a names list and a mailbox list that can't be read
+// as pairs (both present, different lengths). Mailboxes are what tell two
+// people of the same name apart, so which name goes with which mailbox must
+// not be guessed.
+func (t Trip) PairingProblem() bool {
+	return len(t.Names) > 0 && len(t.Emails) > 0 && len(t.Names) != len(t.Emails)
 }
 
 // PriorityRank orders people for rental-car approval: those without a car of

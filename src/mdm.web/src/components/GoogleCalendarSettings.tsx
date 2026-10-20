@@ -270,7 +270,7 @@ export function GoogleCalendarSettings() {
       const lines = [`已寄出 ${data.counts.sent ?? 0} 封`];
       if (data.counts.already_sent) lines.push(`先前已通知 ${data.counts.already_sent} 位（略過）`);
       if (failed.length) lines.push(`失敗 ${failed.length} 封：\n` + failed.map((f) => `${f.email}：${f.error}`).join("\n"));
-      if (data.incomplete?.length) lines.push(`格式不完整、未寄出 ${data.incomplete.length} 個活動：\n` + data.incomplete.map((i) => `${i.summary}（缺 ${i.missing.join("、")}）`).join("\n"));
+      if (data.incomplete?.length) lines.push(`格式有問題、未寄出 ${data.incomplete.length} 個活動：\n` + data.incomplete.map((i) => `${i.summary}（${i.missing.join("、")}）`).join("\n"));
       if (data.truncated) lines.push("數量很多，這次只寄了一部分，請再按一次");
       await (failed.length || data.incomplete?.length ? dialog.error(lines.join("\n")) : dialog.success(lines.join("\n")));
       await loadPreview();
@@ -500,7 +500,7 @@ export function GoogleCalendarSettings() {
                                 ? <span className="badge badge-success badge-sm">符合地點</span>
                                 : <span className="badge badge-ghost badge-sm">{ev.location_used ? "不符合" : "沒有地點"}</span>}
                               {ev.target_location && ev.format_missing.length > 0 && (
-                                <span className="badge badge-warning badge-sm">格式不完整：缺 {ev.format_missing.join("、")}</span>
+                                <span className="badge badge-warning badge-sm">格式有問題：{ev.format_missing.join("、")}</span>
                               )}
                               {ev.target_location && ev.format_missing.length === 0 && ev.candidates.length > 0 && (
                                 ev.notice_due
@@ -530,7 +530,7 @@ export function GoogleCalendarSettings() {
                                     {ev.candidates.length > 0 && ev.days_until > 0 && <span>：出發前 7 天（{ev.notice_from}）起寄出，還有 {ev.days_until} 天出發</span>}
                                   </div>
                                   {ev.format_missing.length > 0 && (
-                                    <p className="text-warning mb-1">說明欄少了必填欄位（{ev.format_missing.join("、")}），補齊前不會寄出通知。五個欄位都要填：{REQUIRED_FIELDS.join("、")}。</p>
+                                    <p className="text-warning mb-1">說明欄格式有問題（{ev.format_missing.join("、")}），修正前不會寄出通知。五個欄位都要填（{REQUIRED_FIELDS.join("、")}），人員與信箱要一一對應、順序相同。</p>
                                   )}
                                   {!preview.directory?.configured
                                     ? <p className="opacity-60">尚未設定人員目錄，無法比對駕照與車輛。</p>

@@ -462,3 +462,102 @@ func TestParseDescription_PlaceholderNamesAndEmailsAreDropped(t *testing.T) {
 		t.Errorf("%+v", tr)
 	}
 }
+
+// The format the business settled on: half-width colons, addresses in the
+// location, nicknames as names, and a mailbox for each.
+const agreedFormat = `地點:經濟部園區管理局(高雄市前鎮區成功二路)、中油林園廠(高雄市林園區)
+時間:1000-1200
+交通:開車
+協會人員:FOY、PIAU
+信箱:foy@mail.isha.org.tw、piau@mail.isha.org.tw`
+
+func TestAgreedFormat_ParsesAndIsComplete(t *testing.T) {
+	tr := ParseDescription(agreedFormat)
+	if m := tr.Missing(); len(m) != 0 {
+		t.Fatalf("missing %v in %+v", m, tr)
+	}
+	if tr.Time != "1000-1200" || tr.Transport != "開車" || len(tr.Names) != 2 || len(tr.Emails) != 2 {
+		t.Errorf("%+v", tr)
+	}
+	if !LocationMatches(tr.Location, DefaultTargetCounties) {
+		t.Errorf("a Kaohsiung address should make it a target: %q", tr.Location)
+	}
+}
+
+func TestEvaluate_NicknamesPairedWithMailboxes(t *testing.T) {
+	users := []User{
+		{SamAccountName: "foy", DisplayName: "26安環處-高雄-劉某", Mail: "foy@mail.isha.org.tw", HasDriverLicense: bp(true), HasOwnCar: bp(false)},
+		{SamAccountName: "piau", DisplayName: "26安環處-高雄-張某", Mail: "piau@mail.isha.org.tw", HasDriverLicense: bp(false)},
+	}
+	res := Evaluate(ParseDescription(agreedFormat), users, DefaultTargetCounties)
+	if len(res.Candidates) != 2 {
+		t.Fatalf("each person once, no phantom 'not found' for the nicknames: %+v", res.Candidates)
+	}
+	c0, c1 := res.Candidates[0], res.Candidates[1]
+	if c0.Name != "FOY" || c0.Decision != Notify || c1.Name != "PIAU" || c1.Decision != NoLicense {
+		t.Errorf("%+v / %+v", c0, c1)
+	}
+}
+
+func TestEvaluate_PairedMailboxNotInDirectoryIsReported(t *testing.T) {
+	tr := ParseDescription(agreedFormat)
+	res := Evaluate(tr, []User{{SamAccountName: "foy", Mail: "foy@mail.isha.org.tw", HasDriverLicense: bp(true)}}, DefaultTargetCounties)
+	if len(res.Candidates) != 2 || res.Candidates[1].Decision != Unmatched || res.Candidates[1].Name != "PIAU" {
+		t.Errorf("%+v", res.Candidates)
+	}
+}
+
+func TestEvaluate_UnequalListsAreNotPaired(t *testing.T) {
+	// Three names, two mailboxes: no way to tell who is who, so names are
+	// looked up on their own as before.
+	tr := Trip{Location: "高雄", Names: []string{"甲", "乙", "丙"}, Emails: []string{"a@x", "b@x"}}
+	users := []User{
+		{SamAccountName: "a", DisplayName: "甲", Mail: "a@x", HasDriverLicense: bp(true)},
+		{SamAccountName: "c", DisplayName: "丙", Mail: "c@x", HasDriverLicense: bp(true)},
+	}
+	res := Evaluate(tr, users, DefaultTargetCounties)
+	got := map[string]Decision{}
+	for _, c := range res.Candidates {
+		got[c.Name+"|"+c.Email] = c.Decision
+	}
+	if got["|a@x"] != Notify || got["|b@x"] != Unmatched || got["丙|c@x"] != Notify || got["乙|"] != Unmatched || len(res.Candidates) != 4 {
+		t.Errorf("%+v", got)
+	}
+}
+
+func TestEvaluate_MailboxDecidesNotTheName(t *testing.T) {
+	// Two real people called 夏宗瑜; the mailbox says which one is travelling.
+	users := []User{
+		{SamAccountName: "a", DisplayName: "26安環處-高雄-夏宗瑜", Mail: "a@mail.isha.org.tw", HasDriverLicense: bp(true), HasOwnCar: bp(true)},
+		{SamAccountName: "b", DisplayName: "27安環處-台北-夏宗瑜", Mail: "b@mail.isha.org.tw", HasDriverLicense: bp(false)},
+	}
+	tr := Trip{Location: "高雄", Names: []string{"夏宗瑜"}, Emails: []string{"b@mail.isha.org.tw"}}
+	res := Evaluate(tr, users, DefaultTargetCounties)
+	if len(res.Candidates) != 1 || res.Candidates[0].User.SamAccountName != "b" || res.Candidates[0].Decision != NoLicense {
+		t.Errorf("%+v", res.Candidates)
+	}
+}
+
+func TestEvaluate_TypoedMailboxIsNotRescuedByName(t *testing.T) {
+	// The name is unique in the directory, but it might be a different person
+	// from the traveller: never guess when the mailbox says otherwise.
+	tr := Trip{Location: "高雄", Names: []string{"夏宗瑜"}, Emails: []string{"zoey.xai@mail.isha.org.tw"}}
+	users := []User{{SamAccountName: "zoey.xia", DisplayName: "26安環處-高雄-夏宗瑜", Mail: "zoey.xia@mail.isha.org.tw", HasDriverLicense: bp(true)}}
+	res := Evaluate(tr, users, DefaultTargetCounties)
+	if len(res.Candidates) != 1 || res.Candidates[0].Decision != Unmatched || res.Candidates[0].User != nil {
+		t.Errorf("%+v", res.Candidates)
+	}
+}
+
+func TestTrip_PairingProblem(t *testing.T) {
+	cases := []struct {
+		names, emails int
+		want          bool
+	}{{2, 2, false}, {1, 1, false}, {3, 2, true}, {1, 2, true}, {0, 2, false}, {2, 0, false}}
+	for _, c := range cases {
+		tr := Trip{Names: make([]string, c.names), Emails: make([]string, c.emails)}
+		if tr.PairingProblem() != c.want {
+			t.Errorf("%d names / %d emails: got %v", c.names, c.emails, !c.want)
+		}
+	}
+}

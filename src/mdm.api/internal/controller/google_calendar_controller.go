@@ -689,8 +689,9 @@ type previewEvent struct {
 	// NoticeDue: a target trip whose notice window (7 days before the start,
 	// up to the start day) is open today. DaysUntil counts Taipei calendar
 	// days from today to the start (0 = today, negative = already started).
-	// FormatMissing lists the required description fields (地點/時間/交通/
-	// 協會人員/信箱) left empty. Only complete events are mailed about.
+	// FormatMissing lists what is wrong with the description format: required
+	// fields (地點/時間/交通/協會人員/信箱) left empty, or names and mailboxes
+	// that don't pair up. Only events with nothing wrong are mailed about.
 	FormatMissing []string `json:"format_missing"`
 	NoticeDue     bool     `json:"notice_due"`
 	NoticeFrom    string   `json:"notice_from,omitempty"`
@@ -710,6 +711,16 @@ type previewCandidate struct {
 	NoticeStatus string `json:"notice_status,omitempty"`
 	NoticeSentAt string `json:"notice_sent_at,omitempty"`
 	NoticeError  string `json:"notice_error,omitempty"`
+}
+
+// formatProblems is the trip's missing required fields plus, when the names
+// and mailboxes can't be paired, a note saying so.
+func formatProblems(t tripcar.Trip) []string {
+	p := t.Missing()
+	if t.PairingProblem() {
+		p = append(p, "人員與信箱數量不一致")
+	}
+	return p
 }
 
 type previewCalendar struct {
@@ -751,7 +762,7 @@ func buildPreviewEvent(cal google.Calendar, ev google.Event, users []tripcar.Use
 	if trip.Emails == nil {
 		trip.Emails = []string{}
 	}
-	p := previewEvent{Event: ev, CalendarID: cal.ID, CalendarSummary: cal.Summary, Trip: trip, Candidates: []previewCandidate{}, FormatMissing: trip.Missing()}
+	p := previewEvent{Event: ev, CalendarID: cal.ID, CalendarSummary: cal.Summary, Trip: trip, Candidates: []previewCandidate{}, FormatMissing: formatProblems(trip)}
 	switch {
 	case trip.Location != "":
 		p.LocationUsed, p.LocationSource = trip.Location, "description"

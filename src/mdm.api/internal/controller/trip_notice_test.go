@@ -112,13 +112,25 @@ func (m *fakeMailer) recipients() []string {
 
 const sendPath = basePath + "/notices/send"
 
-// tripDesc is a description in the mandatory format, with every field filled.
+// mailboxOf are the sample directory people's mailboxes; anyone else gets a
+// made-up one the directory doesn't know.
+var mailboxOf = map[string]string{
+	"夏宗瑜": "zoey.xia@mail.isha.org.tw", "羅羿昇": "yishengluo1006@mail.isha.org.tw", "李念芷": "s01023@mail.isha.org.tw",
+}
+
+// tripDesc is a description in the mandatory format, every field filled, with
+// one mailbox per name in the same order.
 func tripDesc(location string, names ...string) string {
-	lines := []string{"地點：" + location, "時間：09:00-12:00", "交通：高鐵＋租車"}
+	var boxes []string
 	for _, n := range names {
-		lines = append(lines, "協會人員："+n)
+		plain := strings.SplitN(n, "(", 2)[0]
+		box := mailboxOf[plain]
+		if box == "" {
+			box = "unknown-" + plain + "@mail.isha.org.tw"
+		}
+		boxes = append(boxes, box)
 	}
-	return strings.Join(append(lines, "信箱：someone@mail.isha.org.tw"), "\n")
+	return "地點：" + location + "\n時間：09:00-12:00\n交通：高鐵＋租車\n協會人員：" + strings.Join(names, "、") + "\n信箱：" + strings.Join(boxes, "、")
 }
 
 // noticeEnv: today is 2026-10-20 (Taipei); the directory has the sample people.
@@ -363,9 +375,10 @@ func TestSend_OnlyMailsEventsInTheMandatoryFormat(t *testing.T) {
 		ev("ok", full),
 		ev("no-time", strings.Replace(full, "時間：09:00-12:00\n", "", 1)),
 		ev("no-transport", strings.Replace(full, "交通：高鐵＋租車\n", "", 1)),
-		ev("no-mail", strings.Replace(full, "\n信箱：someone@mail.isha.org.tw", "", 1)),
+		ev("no-mail", strings.Replace(full, "\n信箱：yishengluo1006@mail.isha.org.tw", "", 1)),
 		ev("placeholders", "地點：臺南\n時間：—\n交通：—\n協會人員：羅羿昇\n信箱：—"),
 		ev("no-names", strings.Replace(full, "協會人員：羅羿昇\n", "協會人員：—\n", 1)),
+		ev("unpaired", strings.Replace(full, "協會人員：羅羿昇", "協會人員：羅羿昇、夏宗瑜", 1)), // 2 names, 1 mailbox
 	}
 	code, out, raw := postSend(t, e, "")
 	if code != 200 {
@@ -380,7 +393,7 @@ func TestSend_OnlyMailsEventsInTheMandatoryFormat(t *testing.T) {
 	}
 	want := map[string]string{
 		"no-time": "時間", "no-transport": "交通", "no-mail": "信箱",
-		"placeholders": "時間,交通,信箱", "no-names": "協會人員",
+		"placeholders": "時間,交通,信箱", "no-names": "協會人員", "unpaired": "人員與信箱數量不一致",
 	}
 	if len(missing) != len(want) {
 		t.Errorf("incomplete: %v", missing)
