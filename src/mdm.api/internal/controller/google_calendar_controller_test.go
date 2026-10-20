@@ -972,7 +972,9 @@ func directoryUsers() []tripcar.User {
 type candJSON struct {
 	Name, Email, Account, Decision string
 	Priority                       int
-	HasOwnCar                      *bool `json:"has_own_car"`
+	HasOwnCar                      *bool  `json:"has_own_car"`
+	NoticeStatus                   string `json:"notice_status"`
+	NoticeSentAt                   string `json:"notice_sent_at"`
 }
 
 type previewWithCandidates struct {

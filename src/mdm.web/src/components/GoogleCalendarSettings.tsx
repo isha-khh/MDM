@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Calendar, Upload, Link2, Unlink, PlugZap, Trash2, AlertTriangle, CheckCircle2, Copy, Eye, Save } from "lucide-react";
+import { Calendar, Upload, Link2, Unlink, PlugZap, Trash2, AlertTriangle, CheckCircle2, Copy, Eye, Save, Send } from "lucide-react";
 import apiClient from "../lib/apiClient";
 import { useDialog } from "./DialogProvider";
 
@@ -49,6 +49,19 @@ interface Candidate {
   has_driver_license: boolean | null;
   has_own_car: boolean | null;
   priority: number;
+  notice_status?: "sent" | "failed" | "pending";
+  notice_sent_at?: string;
+  notice_error?: string;
+}
+
+interface NoticeResult {
+  calendar_id: string;
+  event_id: string;
+  summary: string;
+  name: string;
+  email: string;
+  result: "sent" | "already_sent" | "failed";
+  error?: string;
 }
 
 const DECISION_BADGE: Record<Decision, { cls: string; label: string }> = {
@@ -120,6 +133,7 @@ export function GoogleCalendarSettings() {
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [onlyTargets, setOnlyTargets] = useState(false);
+  const [sending, setSending] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -227,6 +241,39 @@ export function GoogleCalendarSettings() {
       await dialog.error(errorText(err, "讀取活動失敗"));
     } finally {
       setPreviewing(false);
+    }
+  };
+
+  // Who would be mailed now: matched, licensed, window open, not yet notified.
+  const pendingFor = (ev: PreviewEvent) =>
+    ev.target_location && ev.notice_due
+      ? ev.candidates.filter((c) => c.decision === "notify" && c.email && c.notice_status !== "sent")
+      : [];
+
+  // One event (calendar_id + event_id) or, with no argument, everything due.
+  const sendNotices = async (only?: PreviewEvent) => {
+    const events = only ? [only] : (preview?.events ?? []);
+    const recipients = events.flatMap((ev) => pendingFor(ev).map((c) => `${c.name || c.display_name}（${c.email}）← ${ev.summary}`));
+    if (recipients.length === 0) { await dialog.success("沒有需要寄出的通知"); return; }
+    const shown = recipients.slice(0, 15).join("\n") + (recipients.length > 15 ? `\n…還有 ${recipients.length - 15} 筆` : "");
+    if (!(await dialog.confirm(`將寄出 ${recipients.length} 封借車通知：\n${shown}\n\n每人每個行程只會寄一次。確定寄出？`))) return;
+    setSending(only ? only.calendar_id + only.id : "all");
+    try {
+      const { data } = await apiClient.post<{ results: NoticeResult[]; counts: Record<string, number>; truncated: boolean }>(
+        "/api/settings/google-calendar/notices/send",
+        only ? { calendar_id: only.calendar_id, event_id: only.id } : {},
+      );
+      const failed = data.results.filter((r) => r.result === "failed");
+      const lines = [`已寄出 ${data.counts.sent ?? 0} 封`];
+      if (data.counts.already_sent) lines.push(`先前已通知 ${data.counts.already_sent} 位（略過）`);
+      if (failed.length) lines.push(`失敗 ${failed.length} 封：\n` + failed.map((f) => `${f.email}：${f.error}`).join("\n"));
+      if (data.truncated) lines.push("數量很多，這次只寄了一部分，請再按一次");
+      await (failed.length ? dialog.error(lines.join("\n")) : dialog.success(lines.join("\n")));
+      await loadPreview();
+    } catch (err) {
+      await dialog.error("寄送失敗：" + errorText(err, ""));
+    } finally {
+      setSending("");
     }
   };
 
@@ -403,7 +450,7 @@ export function GoogleCalendarSettings() {
               <h3 className="font-medium text-sm">④ 預覽活動與解析結果</h3>
               <p className="text-xs text-base-content/50">
                 讀取已選日曆未來 60 天的活動，顯示說明欄解析出的地點／人員／信箱，以及地點是否屬於需要借車的縣市
-                {preview ? `（${preview.targets.join("、")}）` : "（台南、高雄、屏東）"}。只讀取，不會寄信也不會寫入任何資料。
+                {preview ? `（${preview.targets.join("、")}）` : "（台南、高雄、屏東）"}。預覽本身不會寄信；只有按下「寄出」才會寄，且每人每個行程只寄一次。
               </p>
               <div className="flex flex-wrap items-center gap-3">
                 <button className="btn btn-sm btn-outline gap-1" disabled={previewing || !status.connected || status.selected_calendar_ids.length === 0} onClick={loadPreview}>
@@ -412,6 +459,12 @@ export function GoogleCalendarSettings() {
                 </button>
                 {status.connected && status.selected_calendar_ids.length === 0 && (
                   <span className="text-xs text-base-content/50">先在上一步選擇並儲存要讀取的日曆</span>
+                )}
+                {preview && preview.events.some((ev) => pendingFor(ev).length > 0) && (
+                  <button className="btn btn-sm btn-primary gap-1" disabled={sending !== ""} onClick={() => sendNotices()}>
+                    {sending === "all" ? <span className="loading loading-spinner loading-xs" /> : <Send size={14} />}
+                    寄出所有到期的通知
+                  </button>
                 )}
                 {preview && (
                   <label className="label cursor-pointer gap-2 p-0">
@@ -477,7 +530,7 @@ export function GoogleCalendarSettings() {
                                         ? <p className="opacity-60">說明欄沒有可辨識的人員。</p>
                                         : (
                                           <table className="table table-xs">
-                                            <thead><tr><th>#</th><th>人員</th><th>判定</th><th>駕照</th><th>自有車</th></tr></thead>
+                                            <thead><tr><th>#</th><th>人員</th><th>判定</th><th>駕照</th><th>自有車</th><th>通知</th></tr></thead>
                                             <tbody>
                                               {ev.candidates.map((c, i) => (
                                                 <tr key={(c.account || c.email || c.name || "") + i}>
@@ -489,12 +542,24 @@ export function GoogleCalendarSettings() {
                                                   <td><span className={`badge badge-sm ${DECISION_BADGE[c.decision].cls}`}>{DECISION_BADGE[c.decision].label}</span></td>
                                                   <td>{c.decision === "unmatched" ? "—" : triLabel(c.has_driver_license, "有", "無")}</td>
                                                   <td>{c.decision === "unmatched" ? "—" : triLabel(c.has_own_car, "有", "無")}</td>
+                                                  <td>
+                                                    {c.notice_status === "sent" ? <span className="text-success">已寄 {c.notice_sent_at ? new Date(c.notice_sent_at).toLocaleString() : ""}</span>
+                                                      : c.notice_status === "failed" ? <span className="text-error" title={c.notice_error}>寄送失敗</span>
+                                                      : c.notice_status === "pending" ? <span className="text-warning">寄送中</span>
+                                                      : "—"}
+                                                  </td>
                                                 </tr>
                                               ))}
                                             </tbody>
                                           </table>
                                         )}
                                 </div>
+                              )}
+                              {pendingFor(ev).length > 0 && (
+                                <button className="btn btn-xs btn-primary gap-1" disabled={sending !== ""} onClick={() => sendNotices(ev)}>
+                                  {sending === ev.calendar_id + ev.id ? <span className="loading loading-spinner loading-xs" /> : <Send size={12} />}
+                                  寄出此活動的通知（{pendingFor(ev).length} 人）
+                                </button>
                               )}
                               <div>
                                 <div className="opacity-60 mb-1">說明欄原文{ev.description_truncated && "（已截斷）"}</div>

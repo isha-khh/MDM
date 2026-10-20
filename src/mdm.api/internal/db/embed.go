@@ -115,3 +115,6 @@ var Migration037SQL string
 
 //go:embed migrations/038_directory_settings.up.sql
 var Migration038SQL string
+
+//go:embed migrations/039_trip_car_notices.up.sql
+var Migration039SQL string

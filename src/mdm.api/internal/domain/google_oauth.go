@@ -127,3 +127,25 @@ type DirectorySettings struct {
 	UpdatedAt time.Time
 	UpdatedBy *string
 }
+
+// Trip rental-car notice statuses.
+const (
+	NoticePending = "pending" // claimed; the mail is being sent (or the server died mid-send)
+	NoticeSent    = "sent"
+	NoticeFailed  = "failed" // may be retried
+)
+
+// TripCarNotice is one row of the notice log: a rental-car reminder for one
+// recipient about one occurrence of one calendar event.
+type TripCarNotice struct {
+	ID               int64
+	CalendarID       string
+	EventID          string
+	EventStart       string // the event's start exactly as Google reports it; a reschedule makes a new notice
+	EventSummary     string
+	RecipientEmail   string
+	RecipientAccount string
+	Status           string
+	Error            string
+	SentAt           *time.Time
+}

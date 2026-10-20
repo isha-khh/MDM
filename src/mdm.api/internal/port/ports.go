@@ -277,3 +277,18 @@ type DirectorySettingsRepository interface {
 	Save(ctx context.Context, baseURL, apiKeyEnc, updatedBy string) error
 	Clear(ctx context.Context, updatedBy string) error
 }
+
+// TripCarNoticeRepository is the log of rental-car notice mails. Claim is the
+// guard against mailing a person twice about the same trip.
+type TripCarNoticeRepository interface {
+	// Claim reserves the (event, start, recipient) notice for sending. It
+	// returns claimed=false when the notice was already sent, or another send
+	// is in flight. A previously failed notice (or one stuck pending for over
+	// 30 minutes, i.e. the server died mid-send) is claimed again.
+	Claim(ctx context.Context, n *domain.TripCarNotice, by string) (id int64, claimed bool, err error)
+	MarkSent(ctx context.Context, id int64) error
+	MarkFailed(ctx context.Context, id int64, reason string) error
+	// ListFromDate returns the notices for events starting on or after the
+	// given date ("2006-01-02").
+	ListFromDate(ctx context.Context, date string) ([]domain.TripCarNotice, error)
+}

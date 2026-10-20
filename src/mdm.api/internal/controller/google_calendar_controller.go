@@ -62,7 +62,10 @@ type GoogleCalendarController struct {
 	// directory looks people up for the preview (license / own car); nil, or
 	// answering ErrDirectoryNotConfigured, means the preview omits that part.
 	directory userDirectory
-	box       *secretbox.Box // nil when SETTINGS_ENCRYPTION_KEY is unset/invalid
+	// notices (the already-notified log) and mailer enable sending; see WithNotices.
+	notices port.TripCarNoticeRepository
+	mailer  noticeMailer
+	box     *secretbox.Box // nil when SETTINGS_ENCRYPTION_KEY is unset/invalid
 	// boxErr says why box is nil, shown to the admin so the fix is obvious.
 	boxErr string
 	auth   *middleware.AuthHelper
@@ -86,6 +89,7 @@ func (c *GoogleCalendarController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/google-calendar/test", c.handleTest)
 	mux.HandleFunc("/api/settings/google-calendar/calendars", c.handleSelectCalendars)
 	mux.HandleFunc("/api/settings/google-calendar/events", c.handleEventsPreview)
+	mux.HandleFunc("/api/settings/google-calendar/notices/send", c.handleSendNotices)
 	mux.HandleFunc("/api/settings/google-calendar/disconnect", c.handleDisconnect)
 }
 
@@ -699,6 +703,10 @@ type previewCandidate struct {
 	HasDriverLicense *bool  `json:"has_driver_license"`
 	HasOwnCar        *bool  `json:"has_own_car"`
 	Priority         int    `json:"priority"` // lower = approved first (no car of their own)
+	// From the notice log: sent / failed / pending, empty when never attempted.
+	NoticeStatus string `json:"notice_status,omitempty"`
+	NoticeSentAt string `json:"notice_sent_at,omitempty"`
+	NoticeError  string `json:"notice_error,omitempty"`
 }
 
 type previewCalendar struct {
@@ -818,39 +826,60 @@ func (c *GoogleCalendarController) handleEventsPreview(w http.ResponseWriter, r 
 		days = n
 	}
 
-	s, err := c.repo.Get(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	res, perr := c.loadPreview(r.Context(), days)
+	if perr != nil {
+		writeError(w, perr.status, perr.msg)
 		return
 	}
+	writeJSON(w, res)
+}
+
+// previewError carries the HTTP status a failed load should be answered with.
+type previewError struct {
+	status int
+	msg    string
+}
+
+type previewResult struct {
+	Days      int                    `json:"days"`
+	Targets   []string               `json:"targets"`
+	Directory map[string]interface{} `json:"directory"`
+	Calendars []previewCalendar      `json:"calendars"`
+	Events    []previewEvent         `json:"events"`
+}
+
+// loadPreview reads the selected calendars' events for the next `days` days
+// and works out, per event, who the trip rules would notify. Shared by the
+// preview and the sender, so what an admin sees is exactly what gets mailed.
+func (c *GoogleCalendarController) loadPreview(ctx context.Context, days int) (*previewResult, *previewError) {
+	s, err := c.repo.Get(ctx)
+	if err != nil {
+		return nil, &previewError{http.StatusInternalServerError, err.Error()}
+	}
 	if len(s.SelectedCalendarIDs) == 0 {
-		writeError(w, http.StatusBadRequest, "請先選擇要讀取的日曆")
-		return
+		return nil, &previewError{http.StatusBadRequest, "請先選擇要讀取的日曆"}
 	}
 	secret, err := c.clientSecret(s)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, &previewError{http.StatusBadRequest, err.Error()}
 	}
 	refresh, err := c.refreshToken(s)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, &previewError{http.StatusBadRequest, err.Error()}
 	}
-	access, err := c.google.RefreshAccessToken(r.Context(), s.ClientID, secret, refresh)
+	access, err := c.google.RefreshAccessToken(ctx, s.ClientID, secret, refresh)
 	if err != nil {
 		log.Printf("[google-calendar] preview: token refresh failed: %v", err)
 		status := http.StatusBadGateway
 		if google.IsInvalidGrant(err) {
 			status = http.StatusConflict
 		}
-		writeError(w, status, googleErrText(err))
-		return
+		return nil, &previewError{status, googleErrText(err)}
 	}
 	// Names come from the calendar list; a selected id that's no longer on it
 	// still gets queried (and will report its own error).
 	names := map[string]google.Calendar{}
-	if all, err := c.google.ListCalendars(r.Context(), access); err == nil {
+	if all, err := c.google.ListCalendars(ctx, access); err == nil {
 		for _, cal := range all {
 			names[cal.ID] = cal
 		}
@@ -861,7 +890,7 @@ func (c *GoogleCalendarController) handleEventsPreview(w http.ResponseWriter, r 
 	var users []tripcar.User
 	dirState := map[string]interface{}{"configured": false}
 	if c.directory != nil {
-		switch u, err := c.directory.Users(r.Context()); {
+		switch u, err := c.directory.Users(ctx); {
 		case err == nil:
 			users = u
 			dirState = map[string]interface{}{"configured": true, "users": len(u)}
@@ -881,7 +910,7 @@ func (c *GoogleCalendarController) handleEventsPreview(w http.ResponseWriter, r 
 		if !ok {
 			cal = google.Calendar{ID: id, Summary: id}
 		}
-		evs, err := c.google.ListEvents(r.Context(), access, id, from, to)
+		evs, err := c.google.ListEvents(ctx, access, id, from, to)
 		pc := previewCalendar{ID: id, Summary: cal.Summary, Count: len(evs)}
 		if err != nil {
 			log.Printf("[google-calendar] preview: reading calendar failed: %v", err)
@@ -893,12 +922,7 @@ func (c *GoogleCalendarController) handleEventsPreview(w http.ResponseWriter, r 
 		}
 	}
 	sort.SliceStable(events, func(i, j int) bool { return startTime(events[i].Event).Before(startTime(events[j].Event)) })
+	c.annotateNotices(ctx, events, now)
 
-	writeJSON(w, map[string]interface{}{
-		"days":      days,
-		"targets":   tripcar.DefaultTargetCounties,
-		"directory": dirState,
-		"calendars": cals,
-		"events":    events,
-	})
+	return &previewResult{Days: days, Targets: tripcar.DefaultTargetCounties, Directory: dirState, Calendars: cals, Events: events}, nil
 }

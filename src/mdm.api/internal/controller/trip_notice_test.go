@@ -1,0 +1,342 @@
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/anthropics/mdm-server/internal/adapter/google"
+	"github.com/anthropics/mdm-server/internal/domain"
+)
+
+// fakeNotices keeps the claim rules of the SQL repo: a notice that is sent or
+// in flight can't be claimed again; a failed one can.
+type fakeNotices struct {
+	mu       sync.Mutex
+	rows     map[string]*domain.TripCarNotice
+	nextID   int64
+	claimErr error
+	listErr  error
+}
+
+func newFakeNotices() *fakeNotices { return &fakeNotices{rows: map[string]*domain.TripCarNotice{}} }
+
+func (f *fakeNotices) Claim(_ context.Context, n *domain.TripCarNotice, _ string) (int64, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.claimErr != nil {
+		return 0, false, f.claimErr
+	}
+	k := noticeKey(n.CalendarID, n.EventID, n.EventStart, n.RecipientEmail)
+	if old, ok := f.rows[k]; ok {
+		if old.Status != domain.NoticeFailed {
+			return 0, false, nil
+		}
+		old.Status, old.Error = domain.NoticePending, ""
+		return old.ID, true, nil
+	}
+	f.nextID++
+	c := *n
+	c.ID, c.Status = f.nextID, domain.NoticePending
+	f.rows[k] = &c
+	return c.ID, true, nil
+}
+
+func (f *fakeNotices) find(id int64) *domain.TripCarNotice {
+	for _, r := range f.rows {
+		if r.ID == id {
+			return r
+		}
+	}
+	return nil
+}
+
+func (f *fakeNotices) MarkSent(_ context.Context, id int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.find(id)
+	now := time.Date(2026, 10, 20, 9, 0, 1, 0, time.UTC)
+	r.Status, r.SentAt = domain.NoticeSent, &now
+	return nil
+}
+
+func (f *fakeNotices) MarkFailed(_ context.Context, id int64, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.find(id)
+	r.Status, r.Error = domain.NoticeFailed, reason
+	return nil
+}
+
+func (f *fakeNotices) ListFromDate(context.Context, string) ([]domain.TripCarNotice, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	var out []domain.TripCarNotice
+	for _, r := range f.rows {
+		out = append(out, *r)
+	}
+	return out, nil
+}
+
+type sentMail struct{ to, subject, body string }
+
+type fakeMailer struct {
+	disabled bool
+	failFor  map[string]error
+	sent     []sentMail
+}
+
+func (m *fakeMailer) Enabled() bool { return !m.disabled }
+func (m *fakeMailer) Send(_ context.Context, to, subject, body string) error {
+	if err := m.failFor[to]; err != nil {
+		return err
+	}
+	m.sent = append(m.sent, sentMail{to, subject, body})
+	return nil
+}
+
+func (m *fakeMailer) recipients() []string {
+	var out []string
+	for _, s := range m.sent {
+		out = append(out, s.to)
+	}
+	return out
+}
+
+const sendPath = basePath + "/notices/send"
+
+// noticeEnv: today is 2026-10-20 (Taipei); the directory has the sample people.
+// "e-two" starts Oct 27 (7 days: window opens today) with four attendees.
+func noticeEnv(t *testing.T) (*env, *fakeNotices, *fakeMailer) {
+	t.Helper()
+	e := previewEnv(t)
+	e.dir.users = directoryUsers()
+	e.g.events["ida@group"] = append(e.g.events["ida@group"], google.Event{
+		ID: "e-two", Summary: "76工危品進廠(臺南分局)", Start: "2026-10-27", AllDay: true,
+		Description: "進廠人員:夏宗瑜(管考)\n進廠人員:羅羿昇\n進廠人員:李念芷\n進廠人員:路人甲\n時間：09:00-12:00",
+	})
+	n, m := newFakeNotices(), &fakeMailer{failFor: map[string]error{}}
+	e.c.WithNotices(n, m)
+	return e, n, m
+}
+
+type sendResp struct {
+	Results []noticeResult `json:"results"`
+	Counts  map[string]int `json:"counts"`
+}
+
+func postSend(t *testing.T, e *env, body string) (int, sendResp, string) {
+	t.Helper()
+	rec := do(e.mux, "POST", sendPath, tokenFor(t, "admin", "sys_admin"), "application/json", []byte(body))
+	var out sendResp
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec.Code, out, rec.Body.String()
+}
+
+func TestSend_MailsOnlyLicensedDueAttendeesAndOnlyOnce(t *testing.T) {
+	e, notices, mailer := noticeEnv(t)
+
+	code, out, raw := postSend(t, e, "")
+	if code != 200 {
+		t.Fatalf("%d %s", code, raw)
+	}
+	// Due and target: e-two (Oct 27) and e-visit (Oct 26, 高屏). Licensed and matched:
+	// 羅羿昇 (on both), 夏宗瑜 (e-two). 李念芷 has no license data, 路人甲 isn't in the
+	// directory, 吳宜蓁 (e-khh) has no license; the Miaoli trip isn't a target.
+	got := mailer.recipients()
+	want := map[string]int{"yishengluo1006@mail.isha.org.tw": 2, "zoey.xia@mail.isha.org.tw": 1}
+	if len(got) != 3 {
+		t.Fatalf("recipients: %v", got)
+	}
+	for _, r := range got {
+		want[r]--
+	}
+	for r, n := range want {
+		if n != 0 {
+			t.Errorf("%s: off by %d (got %v)", r, n, got)
+		}
+	}
+	if out.Counts["sent"] != 3 || out.Counts["failed"] != 0 {
+		t.Errorf("counts %+v", out.Counts)
+	}
+	if len(notices.rows) != 3 {
+		t.Errorf("log should hold exactly the 3 mails sent: %d rows", len(notices.rows))
+	}
+	for _, m := range mailer.sent {
+		if !strings.Contains(m.subject, "出差借車提醒") || !strings.Contains(m.body, "您好") {
+			t.Errorf("mail content: %+v", m)
+		}
+	}
+	two := mailer.sent[0]
+	for _, m := range mailer.sent {
+		if strings.Contains(m.subject, "2026-10-27") {
+			two = m
+		}
+	}
+	if !strings.Contains(two.subject, "2026-10-27") || !strings.Contains(two.body, "09:00-12:00") || !strings.Contains(two.body, "7 天後") {
+		t.Errorf("e-two mail: %+v", two)
+	}
+
+	// Pressing again mails nobody.
+	before := len(mailer.sent)
+	code, out, _ = postSend(t, e, "")
+	if code != 200 || len(mailer.sent) != before || out.Counts["sent"] != 0 || out.Counts["already_sent"] != 3 {
+		t.Errorf("second press: %d sent=%d counts=%+v", code, len(mailer.sent)-before, out.Counts)
+	}
+
+	// The preview now says who was notified.
+	_, prev := previewWithDirectory(t, e)
+	var seen int
+	for _, ev := range prev.Events {
+		for _, c := range ev.Candidates {
+			if c.NoticeStatus == "sent" {
+				seen++
+				if c.NoticeSentAt == "" {
+					t.Errorf("sent notice should carry a time: %+v", c)
+				}
+			}
+		}
+	}
+	if seen != 3 {
+		t.Errorf("preview shows %d as notified, want 3", seen)
+	}
+}
+
+func TestSend_WindowIsRespected(t *testing.T) {
+	e, _, mailer := noticeEnv(t)
+	// Oct 28 is 8 days away: the window hasn't opened. A trip that started today is too late.
+	e.g.events["ida@group"] = []google.Event{
+		{ID: "far", Summary: "遠(臺南分局)", Start: "2026-10-28", AllDay: true, Description: "進廠人員:羅羿昇"},
+		{ID: "late", Summary: "已出發(臺南分局)", Start: "2026-10-20", AllDay: true, Description: "進廠人員:羅羿昇"},
+	}
+	e.g.events["bip@group"] = nil
+	if code, out, raw := postSend(t, e, ""); code != 200 || len(mailer.sent) != 0 || out.Counts["sent"] != 0 {
+		t.Errorf("%d %s sent=%d", code, raw, len(mailer.sent))
+	}
+}
+
+func TestSend_FailureIsLoggedAndRetriedWithoutResendingTheRest(t *testing.T) {
+	e, notices, mailer := noticeEnv(t)
+	mailer.failFor["zoey.xia@mail.isha.org.tw"] = errors.New("smtp: 550 mailbox unavailable")
+
+	_, out, _ := postSend(t, e, "")
+	if out.Counts["sent"] != 2 || out.Counts["failed"] != 1 {
+		t.Fatalf("counts %+v", out.Counts)
+	}
+	var failed *domain.TripCarNotice
+	for _, r := range notices.rows {
+		if r.Status == domain.NoticeFailed {
+			failed = r
+		}
+	}
+	if failed == nil || failed.RecipientEmail != "zoey.xia@mail.isha.org.tw" || !strings.Contains(failed.Error, "550") {
+		t.Fatalf("failed row: %+v", failed)
+	}
+
+	// The mailbox is fixed; pressing again mails only that person.
+	delete(mailer.failFor, "zoey.xia@mail.isha.org.tw")
+	mailer.sent = nil
+	_, out, _ = postSend(t, e, "")
+	if got := mailer.recipients(); len(got) != 1 || got[0] != "zoey.xia@mail.isha.org.tw" || out.Counts["sent"] != 1 {
+		t.Errorf("retry: %v %+v", got, out.Counts)
+	}
+}
+
+func TestSend_RescheduledTripIsAnnouncedAgain(t *testing.T) {
+	e, _, mailer := noticeEnv(t)
+	e.g.events["bip@group"] = nil
+	e.g.events["ida@group"] = []google.Event{{ID: "t", Summary: "進廠(臺南分局)", Start: "2026-10-26", AllDay: true, Description: "進廠人員:羅羿昇"}}
+	postSend(t, e, "")
+	e.g.events["ida@group"][0].Start = "2026-10-27" // moved a day
+	postSend(t, e, "")
+	if len(mailer.sent) != 2 || !strings.Contains(mailer.sent[1].subject, "2026-10-27") {
+		t.Errorf("a new date should be mailed again: %+v", mailer.sent)
+	}
+}
+
+func TestSend_SingleEvent(t *testing.T) {
+	e, _, mailer := noticeEnv(t)
+	code, out, _ := postSend(t, e, `{"calendar_id":"ida@group","event_id":"e-two"}`)
+	if code != 200 || out.Counts["sent"] != 2 {
+		t.Fatalf("%d %+v", code, out.Counts)
+	}
+	for _, m := range mailer.sent {
+		if !strings.Contains(m.subject, "2026-10-27") {
+			t.Errorf("only e-two should have been mailed: %q", m.subject)
+		}
+	}
+	if code, _, _ := postSend(t, e, `{"calendar_id":"ida@group","event_id":"nope"}`); code != 404 {
+		t.Errorf("unknown event: %d", code)
+	}
+	if code, _, _ := postSend(t, e, `{"event_id":"e-two"}`); code != 400 {
+		t.Errorf("event without calendar: %d", code)
+	}
+	if code, _, _ := postSend(t, e, `{bad`); code != 400 {
+		t.Errorf("garbage body: %d", code)
+	}
+}
+
+func TestSend_RefusesWhenItCannotBeSure(t *testing.T) {
+	cases := map[string]func(e *env, n *fakeNotices, m *fakeMailer){
+		"directory not configured": func(e *env, _ *fakeNotices, _ *fakeMailer) { e.dir.err = ErrDirectoryNotConfigured },
+		"directory failing":        func(e *env, _ *fakeNotices, _ *fakeMailer) { e.dir.err = errors.New("目錄服務拒絕了 API key") },
+		"no directory wired":       func(e *env, _ *fakeNotices, _ *fakeMailer) { e.c.directory = nil },
+		"smtp not configured":      func(_ *env, _ *fakeNotices, m *fakeMailer) { m.disabled = true },
+	}
+	for name, setup := range cases {
+		e, notices, mailer := noticeEnv(t)
+		setup(e, notices, mailer)
+		code, _, raw := postSend(t, e, "")
+		if code != 409 && code != 502 {
+			t.Errorf("%s: status %d %s", name, code, raw)
+		}
+		if len(mailer.sent) != 0 || len(notices.rows) != 0 {
+			t.Errorf("%s: nothing may be sent or logged (sent=%d rows=%d)", name, len(mailer.sent), len(notices.rows))
+		}
+	}
+
+	e := previewEnv(t) // sending never wired
+	if code, _, _ := postSend(t, e, ""); code != 503 {
+		t.Errorf("not wired: %d", code)
+	}
+}
+
+func TestSend_LogFailureMeansNoMail(t *testing.T) {
+	e, notices, mailer := noticeEnv(t)
+	notices.claimErr = errors.New("db down")
+	code, out, _ := postSend(t, e, "")
+	if code != 200 || len(mailer.sent) != 0 || out.Counts["failed"] != 3 {
+		t.Errorf("if the log can't be written, no mail may go out: %d sent=%d %+v", code, len(mailer.sent), out.Counts)
+	}
+}
+
+func TestSend_PreviewStillWorksWhenTheLogCannotBeRead(t *testing.T) {
+	e, notices, _ := noticeEnv(t)
+	notices.listErr = errors.New("db down")
+	rec, out := previewWithDirectory(t, e)
+	if rec.Code != 200 || len(out.Events) != 6 {
+		t.Errorf("%d events=%d", rec.Code, len(out.Events))
+	}
+}
+
+func TestSend_RequiresSysAdmin(t *testing.T) {
+	e, notices, mailer := noticeEnv(t)
+	for name, tok := range map[string]string{"anonymous": "", "ordinary user": tokenFor(t, "user", "")} {
+		if rec := do(e.mux, "POST", sendPath, tok, "application/json", nil); rec.Code != 401 {
+			t.Errorf("%s: %d", name, rec.Code)
+		}
+	}
+	if rec := do(e.mux, "GET", sendPath, tokenFor(t, "admin", "sys_admin"), "", nil); rec.Code != 405 {
+		t.Errorf("GET: %d", rec.Code)
+	}
+	if len(mailer.sent) != 0 || len(notices.rows) != 0 {
+		t.Error("an unauthorised request had an effect")
+	}
+}
