@@ -36,6 +36,11 @@ const maxCredentialsFileBytes = 64 << 10
 // oauthStateTTL is how long the admin has to finish the Google consent screen.
 const oauthStateTTL = 10 * time.Minute
 
+// userDirectory supplies the people to match trip attendees against.
+type userDirectory interface {
+	Users(ctx context.Context) ([]tripcar.User, error)
+}
+
 // googleAPI is the slice of Google's APIs this controller uses; *google.Client
 // satisfies it, tests substitute a fake.
 type googleAPI interface {
@@ -54,7 +59,10 @@ type googleAPI interface {
 type GoogleCalendarController struct {
 	repo   port.GoogleCalendarSettingsRepository
 	google googleAPI
-	box    *secretbox.Box // nil when SETTINGS_ENCRYPTION_KEY is unset/invalid
+	// directory looks people up for the preview (license / own car); nil, or
+	// answering ErrDirectoryNotConfigured, means the preview omits that part.
+	directory userDirectory
+	box       *secretbox.Box // nil when SETTINGS_ENCRYPTION_KEY is unset/invalid
 	// boxErr says why box is nil, shown to the admin so the fix is obvious.
 	boxErr string
 	auth   *middleware.AuthHelper
@@ -64,20 +72,9 @@ type GoogleCalendarController struct {
 // NewGoogleCalendarController takes the raw SETTINGS_ENCRYPTION_KEY value. An
 // empty or malformed key doesn't stop the server (this is an optional
 // feature); the endpoints just refuse to store secrets and say why.
-func NewGoogleCalendarController(repo port.GoogleCalendarSettingsRepository, encryptionKey string, auth *middleware.AuthHelper, g googleAPI) *GoogleCalendarController {
-	c := &GoogleCalendarController{repo: repo, auth: auth, google: g, now: time.Now}
-	if strings.TrimSpace(encryptionKey) == "" {
-		c.boxErr = "尚未設定 SETTINGS_ENCRYPTION_KEY，無法加密儲存憑證"
-		log.Printf("[google-calendar] SETTINGS_ENCRYPTION_KEY is not set: credential storage disabled")
-		return c
-	}
-	box, err := secretbox.NewFromString(encryptionKey)
-	if err != nil {
-		c.boxErr = "SETTINGS_ENCRYPTION_KEY 格式不正確（需要 64 個 hex 字元，或 32 bytes 的 base64，可用 openssl rand -base64 32 產生）"
-		log.Printf("[google-calendar] SETTINGS_ENCRYPTION_KEY is invalid: %v", err)
-		return c
-	}
-	c.box = box
+func NewGoogleCalendarController(repo port.GoogleCalendarSettingsRepository, encryptionKey string, auth *middleware.AuthHelper, g googleAPI, dir userDirectory) *GoogleCalendarController {
+	c := &GoogleCalendarController{repo: repo, auth: auth, google: g, directory: dir, now: time.Now}
+	c.box, c.boxErr = newSettingsBox(encryptionKey, "google-calendar")
 	return c
 }
 
@@ -682,6 +679,26 @@ type previewEvent struct {
 	LocationSource string `json:"location_source"` // "description", "event", "title" or ""
 	TargetLocation bool   `json:"target_location"`
 	Truncated      bool   `json:"description_truncated,omitempty"`
+	// Attendees matched against the directory (target destinations only), in
+	// approval priority order. Empty when the directory isn't available.
+	Candidates []previewCandidate `json:"candidates"`
+	// NoticeDue: a target trip whose notice window (7 days before the start,
+	// up to the start day) is open today. DaysUntil counts Taipei calendar
+	// days from today to the start (0 = today, negative = already started).
+	NoticeDue  bool   `json:"notice_due"`
+	NoticeFrom string `json:"notice_from,omitempty"`
+	DaysUntil  int    `json:"days_until"`
+}
+
+type previewCandidate struct {
+	Name             string `json:"name,omitempty"`
+	Email            string `json:"email,omitempty"`
+	Account          string `json:"account,omitempty"`
+	DisplayName      string `json:"display_name,omitempty"`
+	Decision         string `json:"decision"` // notify, missing_data, no_license, unmatched
+	HasDriverLicense *bool  `json:"has_driver_license"`
+	HasOwnCar        *bool  `json:"has_own_car"`
+	Priority         int    `json:"priority"` // lower = approved first (no car of their own)
 }
 
 type previewCalendar struct {
@@ -691,7 +708,31 @@ type previewCalendar struct {
 	Error   string `json:"error,omitempty"`
 }
 
-func buildPreviewEvent(cal google.Calendar, ev google.Event) previewEvent {
+// taipei is a fixed UTC+8: Taiwan has no daylight saving, so this is exact
+// and needs no time zone database in the container.
+var taipei = time.FixedZone("Asia/Taipei", 8*3600)
+
+// eventStart is the event's start as a Taipei time; all-day events start at
+// 00:00 on their date.
+func eventStart(ev google.Event) (time.Time, bool) {
+	if t, err := time.Parse(time.RFC3339, ev.Start); err == nil {
+		return t.In(taipei), true
+	}
+	if d, err := time.Parse("2006-01-02", ev.Start); err == nil {
+		return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, taipei), true
+	}
+	return time.Time{}, false
+}
+
+func calendarDay(t time.Time) time.Time {
+	t = t.In(taipei)
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, taipei)
+}
+
+// buildPreviewEvent parses one event and works out what the trip rules would
+// do with it. users == nil means the directory isn't available, so attendees
+// are left unevaluated rather than all reported as "not found".
+func buildPreviewEvent(cal google.Calendar, ev google.Event, users []tripcar.User, now time.Time) previewEvent {
 	trip := tripcar.ParseDescription(ev.Description)
 	if trip.Names == nil {
 		trip.Names = []string{}
@@ -699,7 +740,7 @@ func buildPreviewEvent(cal google.Calendar, ev google.Event) previewEvent {
 	if trip.Emails == nil {
 		trip.Emails = []string{}
 	}
-	p := previewEvent{Event: ev, CalendarID: cal.ID, CalendarSummary: cal.Summary, Trip: trip}
+	p := previewEvent{Event: ev, CalendarID: cal.ID, CalendarSummary: cal.Summary, Trip: trip, Candidates: []previewCandidate{}}
 	switch {
 	case trip.Location != "":
 		p.LocationUsed, p.LocationSource = trip.Location, "description"
@@ -713,6 +754,28 @@ func buildPreviewEvent(cal google.Calendar, ev google.Event) previewEvent {
 	p.TargetLocation = tripcar.LocationMatches(p.LocationUsed, tripcar.DefaultTargetCounties)
 	if r := []rune(p.Description); len(r) > maxDescriptionChars {
 		p.Description, p.Truncated = string(r[:maxDescriptionChars]), true
+	}
+
+	if start, ok := eventStart(ev); ok {
+		p.DaysUntil = int(calendarDay(start).Sub(calendarDay(now)).Hours() / 24)
+		if p.TargetLocation {
+			p.NoticeFrom = calendarDay(start).AddDate(0, 0, -tripcar.NoticeLeadDays).Format("2006-01-02")
+			p.NoticeDue = tripcar.DueForNotice(start, now, false, taipei)
+		}
+	}
+
+	if p.TargetLocation && users != nil {
+		trip.Location = p.LocationUsed // judge by the destination actually found, wherever it came from
+		res := tripcar.Evaluate(trip, users, tripcar.DefaultTargetCounties)
+		tripcar.SortByPriority(res.Candidates)
+		for _, c := range res.Candidates {
+			pc := previewCandidate{Name: c.Name, Email: c.Email, Decision: string(c.Decision), Priority: tripcar.PriorityRank(c.User)}
+			if c.User != nil {
+				pc.Account, pc.DisplayName = c.User.SamAccountName, c.User.DisplayName
+				pc.HasDriverLicense, pc.HasOwnCar = c.User.HasDriverLicense, c.User.HasOwnCar
+			}
+			p.Candidates = append(p.Candidates, pc)
+		}
 	}
 	return p
 }
@@ -793,6 +856,22 @@ func (c *GoogleCalendarController) handleEventsPreview(w http.ResponseWriter, r 
 		}
 	}
 
+	// The directory (license / own car) is optional for the preview: without it
+	// the events and parsing still show, just without who would be notified.
+	var users []tripcar.User
+	dirState := map[string]interface{}{"configured": false}
+	if c.directory != nil {
+		switch u, err := c.directory.Users(r.Context()); {
+		case err == nil:
+			users = u
+			dirState = map[string]interface{}{"configured": true, "users": len(u)}
+		case errors.Is(err, ErrDirectoryNotConfigured):
+		default:
+			log.Printf("[google-calendar] preview: directory unavailable: %v", err)
+			dirState = map[string]interface{}{"configured": true, "error": err.Error()}
+		}
+	}
+
 	now := c.now()
 	from, to := now.Add(-24*time.Hour), now.AddDate(0, 0, days) // yesterday on, so a trip already under way still shows
 	cals := make([]previewCalendar, 0, len(s.SelectedCalendarIDs))
@@ -810,7 +889,7 @@ func (c *GoogleCalendarController) handleEventsPreview(w http.ResponseWriter, r 
 		}
 		cals = append(cals, pc)
 		for _, ev := range evs {
-			events = append(events, buildPreviewEvent(cal, ev))
+			events = append(events, buildPreviewEvent(cal, ev, users, now))
 		}
 	}
 	sort.SliceStable(events, func(i, j int) bool { return startTime(events[i].Event).Before(startTime(events[j].Event)) })
@@ -818,6 +897,7 @@ func (c *GoogleCalendarController) handleEventsPreview(w http.ResponseWriter, r 
 	writeJSON(w, map[string]interface{}{
 		"days":      days,
 		"targets":   tripcar.DefaultTargetCounties,
+		"directory": dirState,
 		"calendars": cals,
 		"events":    events,
 	})

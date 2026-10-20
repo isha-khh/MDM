@@ -30,14 +30,49 @@ interface PreviewEvent {
   calendar_summary: string;
   trip: { location: string; time: string; transport: string; names: string[]; emails: string[] };
   location_used: string;
-  location_source: "description" | "event" | "";
+  location_source: "description" | "event" | "title" | "";
   target_location: boolean;
+  candidates: Candidate[];
+  notice_due: boolean;
+  notice_from?: string;
+  days_until: number;
+}
+
+type Decision = "notify" | "missing_data" | "no_license" | "unmatched";
+
+interface Candidate {
+  name?: string;
+  email?: string;
+  account?: string;
+  display_name?: string;
+  decision: Decision;
+  has_driver_license: boolean | null;
+  has_own_car: boolean | null;
+  priority: number;
+}
+
+const DECISION_BADGE: Record<Decision, { cls: string; label: string }> = {
+  notify: { cls: "badge-success", label: "會通知" },
+  missing_data: { cls: "badge-warning", label: "資料不全" },
+  no_license: { cls: "badge-ghost", label: "無駕照" },
+  unmatched: { cls: "badge-error", label: "找不到人" },
+};
+
+const LOCATION_SOURCE_LABELS: Record<string, string> = {
+  description: "說明欄「地點：」",
+  event: "活動的地點欄位",
+  title: "標題括號內",
+};
+
+function triLabel(v: boolean | null | undefined, yes: string, no: string): string {
+  return v === true ? yes : v === false ? no : "未填";
 }
 
 interface Preview {
   days: number;
   targets: string[];
   calendars: { id: string; summary: string; count: number; error?: string }[];
+  directory?: { configured: boolean; users?: number; error?: string };
   events: PreviewEvent[];
 }
 
@@ -407,6 +442,13 @@ export function GoogleCalendarSettings() {
                               {ev.target_location
                                 ? <span className="badge badge-success badge-sm">符合地點</span>
                                 : <span className="badge badge-ghost badge-sm">{ev.location_used ? "不符合" : "沒有地點"}</span>}
+                              {ev.target_location && ev.candidates.length > 0 && (
+                                ev.notice_due
+                                  ? <span className="badge badge-info badge-sm">今天起可通知</span>
+                                  : ev.days_until > 0
+                                    ? <span className="badge badge-ghost badge-sm">{ev.notice_from} 起通知</span>
+                                    : <span className="badge badge-ghost badge-sm">已出發</span>
+                              )}
                               {ev.trip.emails.length + ev.trip.names.length > 0 && (
                                 <span className="text-xs opacity-60">{ev.trip.names.length} 人／{ev.trip.emails.length} 信箱</span>
                               )}
@@ -415,12 +457,45 @@ export function GoogleCalendarSettings() {
                             <div className="p-3 border-t border-base-300 text-xs space-y-2">
                               <dl className="grid grid-cols-[5rem_1fr] gap-x-2 gap-y-1">
                                 <dt className="opacity-60">判斷地點</dt>
-                                <dd>{ev.location_used || "—"}{ev.location_source && <span className="opacity-50">（來自{ev.location_source === "description" ? "說明欄「地點：」" : "活動的地點欄位"}）</span>}</dd>
+                                <dd>{ev.location_used || "—"}{ev.location_source && <span className="opacity-50">（來自{LOCATION_SOURCE_LABELS[ev.location_source] ?? ev.location_source}）</span>}</dd>
                                 <dt className="opacity-60">時間</dt><dd>{ev.trip.time || "—"}</dd>
                                 <dt className="opacity-60">交通</dt><dd>{ev.trip.transport || "—"}</dd>
                                 <dt className="opacity-60">協會人員</dt><dd>{ev.trip.names.join("、") || "—"}</dd>
                                 <dt className="opacity-60">信箱</dt><dd className="break-all">{ev.trip.emails.join("、") || "—"}</dd>
                               </dl>
+                              {ev.target_location && (
+                                <div>
+                                  <div className="opacity-60 mb-1">
+                                    借車通知對象（沒有自己車的排前面）
+                                    {ev.candidates.length > 0 && ev.days_until > 0 && <span>：出發前 7 天（{ev.notice_from}）起寄出，還有 {ev.days_until} 天出發</span>}
+                                  </div>
+                                  {!preview.directory?.configured
+                                    ? <p className="opacity-60">尚未設定人員目錄，無法比對駕照與車輛。</p>
+                                    : preview.directory.error
+                                      ? <p className="text-error">人員目錄讀取失敗：{preview.directory.error}</p>
+                                      : ev.candidates.length === 0
+                                        ? <p className="opacity-60">說明欄沒有可辨識的人員。</p>
+                                        : (
+                                          <table className="table table-xs">
+                                            <thead><tr><th>#</th><th>人員</th><th>判定</th><th>駕照</th><th>自有車</th></tr></thead>
+                                            <tbody>
+                                              {ev.candidates.map((c, i) => (
+                                                <tr key={(c.account || c.email || c.name || "") + i}>
+                                                  <td>{i + 1}</td>
+                                                  <td>
+                                                    <div>{c.name || c.display_name || c.email}</div>
+                                                    {c.email && <div className="opacity-50 break-all">{c.email}</div>}
+                                                  </td>
+                                                  <td><span className={`badge badge-sm ${DECISION_BADGE[c.decision].cls}`}>{DECISION_BADGE[c.decision].label}</span></td>
+                                                  <td>{c.decision === "unmatched" ? "—" : triLabel(c.has_driver_license, "有", "無")}</td>
+                                                  <td>{c.decision === "unmatched" ? "—" : triLabel(c.has_own_car, "有", "無")}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        )}
+                                </div>
+                              )}
                               <div>
                                 <div className="opacity-60 mb-1">說明欄原文{ev.description_truncated && "（已截斷）"}</div>
                                 <pre className="whitespace-pre-wrap break-words bg-base-200 rounded p-2 max-h-48 overflow-auto">{ev.description || "（空白）"}</pre>

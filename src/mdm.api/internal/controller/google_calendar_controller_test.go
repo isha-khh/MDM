@@ -17,6 +17,7 @@ import (
 	"github.com/anthropics/mdm-server/internal/adapter/google"
 	"github.com/anthropics/mdm-server/internal/domain"
 	"github.com/anthropics/mdm-server/internal/middleware"
+	"github.com/anthropics/mdm-server/internal/service/tripcar"
 )
 
 const testJWTSecret = "test-jwt-secret"
@@ -103,6 +104,18 @@ func (f *fakeGoogle) Revoke(_ context.Context, token string) error {
 	return f.revokeErr
 }
 
+// fakeDirectory stands in for the user directory.
+type fakeDirectory struct {
+	users []tripcar.User
+	err   error
+	calls int
+}
+
+func (f *fakeDirectory) Users(context.Context) ([]tripcar.User, error) {
+	f.calls++
+	return f.users, f.err
+}
+
 func validKey() string { return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)) }
 
 const (
@@ -117,6 +130,7 @@ type env struct {
 	c    *GoogleCalendarController
 	repo *fakeGoogleRepo
 	g    *fakeGoogle
+	dir  *fakeDirectory
 	mux  *http.ServeMux
 	now  time.Time
 }
@@ -124,7 +138,8 @@ type env struct {
 func newEnv(t *testing.T, key string) *env {
 	t.Helper()
 	e := &env{repo: &fakeGoogleRepo{}, g: &fakeGoogle{}, now: time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)}
-	e.c = NewGoogleCalendarController(e.repo, key, middleware.NewAuthHelper(testJWTSecret, nil), e.g)
+	e.dir = &fakeDirectory{}
+	e.c = NewGoogleCalendarController(e.repo, key, middleware.NewAuthHelper(testJWTSecret, nil), e.g, e.dir)
 	e.c.now = func() time.Time { return e.now }
 	e.mux = http.NewServeMux()
 	e.c.RegisterRoutes(e.mux)
@@ -363,7 +378,7 @@ func TestStatusReportsWhyEncryptionIsOff(t *testing.T) {
 func TestDecryptWithDifferentKeyFails(t *testing.T) {
 	e := newEnv(t, validKey())
 	e.uploadCreds(t)
-	other := NewGoogleCalendarController(e.repo, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), middleware.NewAuthHelper(testJWTSecret, nil), e.g)
+	other := NewGoogleCalendarController(e.repo, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), middleware.NewAuthHelper(testJWTSecret, nil), e.g, nil)
 	if _, err := other.clientSecret(&e.repo.s); err == nil {
 		t.Error("decrypting with a different key must fail")
 	}
@@ -937,5 +952,199 @@ func TestCleanCalendarIDs(t *testing.T) {
 	}
 	if got, _ := cleanCalendarIDs(nil); got == nil || len(got) != 0 {
 		t.Errorf("nil input should give an empty, non-nil slice, got %#v", got)
+	}
+}
+
+// ---------------- preview: who would be notified ----------------
+
+func bp(b bool) *bool { return &b }
+
+func directoryUsers() []tripcar.User {
+	return []tripcar.User{
+		{SamAccountName: "yishengluo1006", DisplayName: "26安環處-高雄-羅羿昇", Mail: "yishengluo1006@mail.isha.org.tw", HasDriverLicense: bp(true), HasOwnCar: bp(false)},
+		{SamAccountName: "zoey.xia", DisplayName: "26安環處-高雄-夏宗瑜", Mail: "zoey.xia@mail.isha.org.tw", HasDriverLicense: bp(true), HasOwnCar: bp(true)},
+		{SamAccountName: "s01023", DisplayName: "26安環處-高雄-李念芷", Mail: "s01023@mail.isha.org.tw"},
+		{SamAccountName: "idsl5397", DisplayName: "26安環處-高雄-吳宜蓁", Mail: "idsl5397@mail.isha.org.tw", HasDriverLicense: bp(false), HasOwnCar: bp(false)},
+		{SamAccountName: "ids", DisplayName: "吳宜蓁"},
+	}
+}
+
+type candJSON struct {
+	Name, Email, Account, Decision string
+	Priority                       int
+	HasOwnCar                      *bool `json:"has_own_car"`
+}
+
+type previewWithCandidates struct {
+	Directory struct {
+		Configured bool   `json:"configured"`
+		Users      int    `json:"users"`
+		Error      string `json:"error"`
+	} `json:"directory"`
+	Events []struct {
+		ID         string     `json:"id"`
+		Target     bool       `json:"target_location"`
+		NoticeDue  bool       `json:"notice_due"`
+		NoticeFrom string     `json:"notice_from"`
+		DaysUntil  int        `json:"days_until"`
+		Candidates []candJSON `json:"candidates"`
+	} `json:"events"`
+}
+
+func previewWithDirectory(t *testing.T, e *env) (*httptest.ResponseRecorder, previewWithCandidates) {
+	t.Helper()
+	rec := do(e.mux, "GET", basePath+"/events", tokenFor(t, "admin", "sys_admin"), "", nil)
+	var out previewWithCandidates
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err, rec.Body.String())
+	}
+	return rec, out
+}
+
+func (p previewWithCandidates) event(id string) (e struct {
+	ID         string     `json:"id"`
+	Target     bool       `json:"target_location"`
+	NoticeDue  bool       `json:"notice_due"`
+	NoticeFrom string     `json:"notice_from"`
+	DaysUntil  int        `json:"days_until"`
+	Candidates []candJSON `json:"candidates"`
+}) {
+	for _, ev := range p.Events {
+		if ev.ID == id {
+			return ev
+		}
+	}
+	return
+}
+
+func TestPreview_ShowsWhoWouldBeNotifiedAndInWhatOrder(t *testing.T) {
+	e := previewEnv(t)
+	e.dir.users = directoryUsers()
+	// two people on one trip, listed by name only (進廠人員 style)
+	e.g.events["ida@group"] = append(e.g.events["ida@group"], google.Event{
+		ID: "e-two", Summary: "76工危品進廠(臺南分局)", Start: "2026-10-27", AllDay: true,
+		Description: "進廠人員:夏宗瑜(管考)\n進廠人員:羅羿昇\n進廠人員:李念芷\n進廠人員:路人甲",
+	})
+	rec, out := previewWithDirectory(t, e)
+	if rec.Code != 200 || !out.Directory.Configured || out.Directory.Users != 5 || out.Directory.Error != "" {
+		t.Fatalf("%d directory %+v", rec.Code, out.Directory)
+	}
+
+	two := out.event("e-two")
+	if !two.Target || len(two.Candidates) != 4 {
+		t.Fatalf("e-two: %+v", two)
+	}
+	// Approval order: no car first (羅羿昇), unknown next (李念芷), then owner (夏宗瑜), then not found.
+	var order []string
+	for _, c := range two.Candidates {
+		order = append(order, c.Name+":"+c.Decision)
+	}
+	if strings.Join(order, ",") != "羅羿昇:notify,李念芷:missing_data,夏宗瑜:notify,路人甲:unmatched" {
+		t.Errorf("order/decisions: %v", order)
+	}
+	if two.Candidates[0].Account != "yishengluo1006" || two.Candidates[0].HasOwnCar == nil || *two.Candidates[0].HasOwnCar {
+		t.Errorf("first candidate: %+v", two.Candidates[0])
+	}
+
+	// A trip with both a name and a mail for the same person doesn't list them twice;
+	// 吳宜蓁 explicitly has no license.
+	khh := out.event("e-khh")
+	if len(khh.Candidates) != 1 || khh.Candidates[0].Decision != "no_license" || khh.Candidates[0].Account != "idsl5397" {
+		t.Errorf("e-khh: %+v", khh.Candidates)
+	}
+
+	// Not a target destination: nothing is evaluated at all.
+	if m := out.event("e-miaoli"); m.Target || len(m.Candidates) != 0 || m.NoticeDue {
+		t.Errorf("a non-target trip must have no candidates and no notice: %+v", m)
+	}
+}
+
+func TestPreview_NoticeWindow(t *testing.T) {
+	// now = 2026-10-20 17:00 Taipei
+	e := previewEnv(t)
+	e.dir.users = directoryUsers()
+	e.g.events["ida@group"] = []google.Event{
+		{ID: "far", Summary: "遠(臺南分局)", Start: "2026-10-28", AllDay: true, Description: "進廠人員:羅羿昇"},     // 8 days: window not open
+		{ID: "edge", Summary: "邊(臺南分局)", Start: "2026-10-27", AllDay: true, Description: "進廠人員:羅羿昇"},    // exactly 7 days: opens today
+		{ID: "soon", Summary: "近(臺南分局)", Start: "2026-10-22T08:00:00+08:00", Description: "進廠人員:羅羿昇"},   // 2 days
+		{ID: "today", Summary: "今(臺南分局)", Start: "2026-10-21", AllDay: true, Description: "進廠人員:羅羿昇"},   // tomorrow
+		{ID: "started", Summary: "已(臺南分局)", Start: "2026-10-20", AllDay: true, Description: "進廠人員:羅羿昇"}, // started today: too late
+	}
+	e.g.events["bip@group"] = nil
+	_, out := previewWithDirectory(t, e)
+	want := map[string]struct {
+		due  bool
+		days int
+		from string
+	}{
+		"far": {false, 8, "2026-10-21"}, "edge": {true, 7, "2026-10-20"}, "soon": {true, 2, "2026-10-15"},
+		"today": {true, 1, "2026-10-14"}, "started": {false, 0, "2026-10-13"},
+	}
+	for id, w := range want {
+		ev := out.event(id)
+		if ev.NoticeDue != w.due || ev.DaysUntil != w.days || ev.NoticeFrom != w.from {
+			t.Errorf("%s: due=%v days=%d from=%s, want %+v", id, ev.NoticeDue, ev.DaysUntil, ev.NoticeFrom, w)
+		}
+	}
+}
+
+func TestPreview_UsesTaipeiCalendarDaysNotUTC(t *testing.T) {
+	// 17:00 UTC on Oct 19 is already 01:00 on Oct 20 in Taipei.
+	e := previewEnv(t)
+	e.now = time.Date(2026, 10, 19, 17, 0, 0, 0, time.UTC)
+	e.dir.users = directoryUsers()
+	e.g.events["ida@group"] = []google.Event{{ID: "x", Summary: "x(臺南分局)", Start: "2026-10-27", AllDay: true, Description: "進廠人員:羅羿昇"}}
+	e.g.events["bip@group"] = nil
+	if ev := func() (r struct {
+		ID         string     `json:"id"`
+		Target     bool       `json:"target_location"`
+		NoticeDue  bool       `json:"notice_due"`
+		NoticeFrom string     `json:"notice_from"`
+		DaysUntil  int        `json:"days_until"`
+		Candidates []candJSON `json:"candidates"`
+	}) {
+		_, o := previewWithDirectory(t, e)
+		return o.event("x")
+	}(); ev.DaysUntil != 7 || !ev.NoticeDue {
+		t.Errorf("in Taipei it is Oct 20, so Oct 27 is 7 days away and due: %+v", ev)
+	}
+}
+
+func TestPreview_WithoutADirectoryStillShowsEventsAndSaysSo(t *testing.T) {
+	// not configured
+	e := previewEnv(t)
+	e.dir.err = ErrDirectoryNotConfigured
+	rec, out := previewWithDirectory(t, e)
+	if rec.Code != 200 || out.Directory.Configured || len(out.Events) != 5 {
+		t.Fatalf("%d %+v events=%d", rec.Code, out.Directory, len(out.Events))
+	}
+	for _, ev := range out.Events {
+		if len(ev.Candidates) != 0 {
+			t.Errorf("%s: without a directory attendees must not be reported as 'not found': %+v", ev.ID, ev.Candidates)
+		}
+	}
+
+	// configured but failing: events still come back, with the reason
+	e = previewEnv(t)
+	e.dir.err = errors.New("目錄服務拒絕了 API key")
+	rec, out = previewWithDirectory(t, e)
+	if rec.Code != 200 || !out.Directory.Configured || !strings.Contains(out.Directory.Error, "API key") || len(out.Events) != 5 {
+		t.Errorf("%d %+v", rec.Code, out.Directory)
+	}
+
+	// no directory wired at all
+	e = previewEnv(t)
+	e.c.directory = nil
+	if rec, out = previewWithDirectory(t, e); rec.Code != 200 || out.Directory.Configured {
+		t.Errorf("nil directory: %d %+v", rec.Code, out.Directory)
+	}
+}
+
+func TestPreview_LooksUpTheDirectoryOncePerRequest(t *testing.T) {
+	e := previewEnv(t)
+	e.dir.users = directoryUsers()
+	previewWithDirectory(t, e)
+	if e.dir.calls != 1 {
+		t.Errorf("the directory should be fetched once per preview, not once per event: %d", e.dir.calls)
 	}
 }

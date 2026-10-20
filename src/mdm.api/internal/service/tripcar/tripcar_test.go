@@ -185,17 +185,20 @@ func TestEvaluate_NameFallbackAndDedup(t *testing.T) {
 	}
 }
 
-func TestEvaluate_AmbiguousNameIsNotGuessed(t *testing.T) {
-	// Two accounts contain 簡維江 and no mail confirms which one.
+func TestEvaluate_DuplicateAccountWithoutMailDoesNotMakeANameAmbiguous(t *testing.T) {
+	// Two accounts contain 簡維江, but only one has a mail address: it is the
+	// real personal account, so the name resolves to it. (Two people who both
+	// have mail stay ambiguous — see the directory-shaped tests below.)
 	r := Evaluate(Trip{Location: "高雄", Names: []string{"簡維江"}}, testUsers(), DefaultTargetCounties)
-	if len(r.Candidates) != 1 || r.Candidates[0].Decision != Unmatched {
-		t.Errorf("ambiguous name should be Unmatched, got %+v", r.Candidates)
+	if len(r.Candidates) != 1 || r.Candidates[0].Decision != Notify || r.Candidates[0].User.SamAccountName != "jjian0225" {
+		t.Errorf("got %+v", r.Candidates)
 	}
 
-	// ...but if the mail pinned one account down, the name is already covered.
+	// A mail address in the event pins the account down directly, and the
+	// name that points at the same person isn't listed again.
 	r = Evaluate(Trip{Location: "高雄", Names: []string{"簡維江"}, Emails: []string{"jjian0225@mail.isha.org.tw"}}, testUsers(), DefaultTargetCounties)
 	if len(r.Candidates) != 1 || r.Candidates[0].Decision != Notify {
-		t.Errorf("mail should resolve the ambiguity, got %+v", r.Candidates)
+		t.Errorf("mail should resolve it once, got %+v", r.Candidates)
 	}
 }
 
@@ -346,5 +349,73 @@ func TestLocationMatches_GaopingShorthand(t *testing.T) {
 	// With only 台南 as a target, the shorthand must not match.
 	if LocationMatches("高屏分局", []string{"台南"}) {
 		t.Error("高屏 should expand to 高雄/屏東 only, not match an unrelated target")
+	}
+}
+
+// Shaped like the real directory: personal accounts with a mail address and
+// department, older short accounts without, service accounts, and tri-state
+// license/car values still being filled in.
+func directoryLikeUsers() []User {
+	return []User{
+		{SamAccountName: "idsl5397", DisplayName: "26安環處-高雄-吳宜蓁", Mail: "idsl5397@mail.isha.org.tw", HasDriverLicense: bp(true), HasOwnCar: bp(false)},
+		{SamAccountName: "ids", DisplayName: "吳宜蓁"},                                              // old short account, no mail
+		{SamAccountName: "s01023", DisplayName: "26安環處-高雄-李念芷", Mail: "s01023@mail.isha.org.tw"}, // license not filled in yet
+		{SamAccountName: "s01", DisplayName: "李念芷"},
+		{SamAccountName: "yishengluo1006", DisplayName: "26安環處-高雄-羅羿昇", Mail: "yishengluo1006@mail.isha.org.tw", HasDriverLicense: bp(true), HasOwnCar: bp(false)},
+		{SamAccountName: "zoey.xia", DisplayName: "26安環處-高雄-夏宗瑜", Mail: "zoey.xia@mail.isha.org.tw", HasDriverLicense: bp(true), HasOwnCar: bp(true)},
+		{SamAccountName: "a403109970", DisplayName: "26安環處-高雄-郭人銓", Mail: "a403109970@mail.isha.org.tw", HasDriverLicense: bp(true), HasOwnCar: bp(false)},
+		{SamAccountName: "jjian0225", DisplayName: "26安環處-高雄-簡維江", Mail: "jjian0225@mail.isha.org.tw", HasDriverLicense: bp(true), HasOwnCar: bp(false)},
+		{SamAccountName: "jjjian0225", DisplayName: "簡維江"},
+		{SamAccountName: "lcc1077", DisplayName: "26安環處-高雄-林雋哲", Mail: "lcc1077@mail.isha.org.tw", HasDriverLicense: bp(true), HasOwnCar: bp(false)},
+		{SamAccountName: "lcc", DisplayName: "林雋哲"},
+		{SamAccountName: "oldhand", DisplayName: "26安環處-高雄-離職者", Mail: "oldhand@mail.isha.org.tw", Disabled: true, HasDriverLicense: bp(true)},
+		{SamAccountName: "tw1", DisplayName: "26安環處-高雄-王小明", Mail: "wang1@mail.isha.org.tw", HasDriverLicense: bp(true)},
+		{SamAccountName: "tw2", DisplayName: "26安環處-台南-王小明", Mail: "wang2@mail.isha.org.tw", HasDriverLicense: bp(true)}, // two real people, same name
+	}
+}
+
+func TestEvaluate_NameWithOldShortAccountResolvesToThePersonalOne(t *testing.T) {
+	// 進廠人員 lines give names only. 吳宜蓁 matches both the personal account and
+	// an old mail-less short account: the one with a mail address wins.
+	r := Evaluate(Trip{Location: "高屏分局", Names: []string{"吳宜蓁", "羅羿昇", "簡維江", "林雋哲"}}, directoryLikeUsers(), DefaultTargetCounties)
+	got := decisions(r)
+	for acct, want := range map[string]Decision{"idsl5397": Notify, "yishengluo1006": Notify, "jjian0225": Notify, "lcc1077": Notify} {
+		if got[acct] != want {
+			t.Errorf("%s: got %v, want %v (all: %v)", acct, got[acct], want, got)
+		}
+	}
+	if len(r.Candidates) != 4 {
+		t.Errorf("each person once, not once per account: %+v", r.Candidates)
+	}
+}
+
+func TestEvaluate_TwoRealPeopleWithTheSameNameStayAmbiguous(t *testing.T) {
+	r := Evaluate(Trip{Location: "台南", Names: []string{"王小明"}}, directoryLikeUsers(), DefaultTargetCounties)
+	if len(r.Candidates) != 1 || r.Candidates[0].Decision != Unmatched || r.Candidates[0].User != nil {
+		t.Errorf("two accounts with mail share the name, so none may be guessed: %+v", r.Candidates)
+	}
+}
+
+func TestEvaluate_DisabledAccountsAreNeverMatched(t *testing.T) {
+	byMail := Evaluate(Trip{Location: "高雄", Emails: []string{"oldhand@mail.isha.org.tw"}}, directoryLikeUsers(), DefaultTargetCounties)
+	byName := Evaluate(Trip{Location: "高雄", Names: []string{"離職者"}}, directoryLikeUsers(), DefaultTargetCounties)
+	for name, r := range map[string]Result{"by mail": byMail, "by name": byName} {
+		if len(r.Candidates) != 1 || r.Candidates[0].Decision != Unmatched {
+			t.Errorf("%s: a disabled account must not be notified: %+v", name, r.Candidates)
+		}
+	}
+}
+
+func TestEvaluate_NameOnlyEventWithMissingDirectoryData(t *testing.T) {
+	// 李念芷's license isn't recorded yet: reported, not mailed.
+	r := Evaluate(Trip{Location: "台南", Names: []string{"李念芷", "夏宗瑜"}}, directoryLikeUsers(), DefaultTargetCounties)
+	got := decisions(r)
+	if got["s01023"] != MissingData || got["zoey.xia"] != Notify {
+		t.Errorf("got %v", got)
+	}
+	SortByPriority(r.Candidates)
+	// 李念芷: car unknown (rank 1); 夏宗瑜 owns a car (rank 2) -> unknown first.
+	if r.Candidates[0].User.SamAccountName != "s01023" || r.Candidates[1].User.SamAccountName != "zoey.xia" {
+		t.Errorf("priority order: %+v", r.Candidates)
 	}
 }

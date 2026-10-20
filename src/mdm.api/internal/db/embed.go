@@ -112,3 +112,6 @@ var Migration036SQL string
 
 //go:embed migrations/037_google_calendar_selected_calendars.up.sql
 var Migration037SQL string
+
+//go:embed migrations/038_directory_settings.up.sql
+var Migration038SQL string

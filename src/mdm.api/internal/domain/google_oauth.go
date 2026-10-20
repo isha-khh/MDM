@@ -118,3 +118,12 @@ func PickGoogleRedirectURI(registered []string, origin string) (string, error) {
 	}
 	return "", ErrRedirectNotRegistered
 }
+
+// DirectorySettings is the stored connection to the company user directory
+// API. The API key is kept only as ciphertext.
+type DirectorySettings struct {
+	BaseURL   string
+	APIKeyEnc string
+	UpdatedAt time.Time
+	UpdatedBy *string
+}

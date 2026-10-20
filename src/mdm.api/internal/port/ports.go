@@ -269,3 +269,11 @@ type GoogleCalendarSettingsRepository interface {
 	// Clear removes the client, token and account entirely.
 	Clear(ctx context.Context, updatedBy string) error
 }
+
+// DirectorySettingsRepository persists the user-directory API connection
+// (single row). It only ever sees ciphertext.
+type DirectorySettingsRepository interface {
+	Get(ctx context.Context) (*domain.DirectorySettings, error)
+	Save(ctx context.Context, baseURL, apiKeyEnc, updatedBy string) error
+	Clear(ctx context.Context, updatedBy string) error
+}

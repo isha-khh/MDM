@@ -21,6 +21,7 @@ type User struct {
 	SamAccountName   string
 	DisplayName      string
 	Mail             string
+	Disabled         bool // a disabled account is never matched or notified
 	HasDriverLicense *bool
 	HasOwnCar        *bool
 }
@@ -70,7 +71,7 @@ func LocationMatches(location string, targets []string) bool {
 
 func findByMail(users []User, mail string) *User {
 	for i := range users {
-		if users[i].Mail != "" && strings.EqualFold(users[i].Mail, mail) {
+		if !users[i].Disabled && users[i].Mail != "" && strings.EqualFold(users[i].Mail, mail) {
 			return &users[i]
 		}
 	}
@@ -78,19 +79,30 @@ func findByMail(users []User, mail string) *User {
 }
 
 // Directory display names look like "26安環處-高雄-林雋哲", so a person's
-// plain name is matched as a substring. Several accounts can share a name
-// (e.g. a personal and a department account for the same person).
+// plain name is matched as a substring. The directory often also holds an
+// older short account for the same person ("林雋哲" with no mail, next to
+// "26安環處-高雄-林雋哲" with one): when a name matches several accounts, the
+// ones with a mail address are the real personal accounts, so if exactly one
+// of those remains it is the match. Otherwise there is more than one
+// candidate and none is guessed. Disabled accounts never match.
 func findByName(users []User, name string) []*User {
-	var out []*User
+	var all, withMail []*User
 	if name == "" {
-		return out
+		return nil
 	}
 	for i := range users {
-		if strings.Contains(users[i].DisplayName, name) {
-			out = append(out, &users[i])
+		if users[i].Disabled || !strings.Contains(users[i].DisplayName, name) {
+			continue
+		}
+		all = append(all, &users[i])
+		if users[i].Mail != "" {
+			withMail = append(withMail, &users[i])
 		}
 	}
-	return out
+	if len(all) > 1 && len(withMail) == 1 {
+		return withMail
+	}
+	return all
 }
 
 func decide(u *User) Decision {
