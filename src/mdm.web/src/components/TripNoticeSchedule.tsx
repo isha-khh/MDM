@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Save } from "lucide-react";
+import { AlertTriangle, RefreshCw, Save } from "lucide-react";
 import apiClient from "../lib/apiClient";
 import { useDialog } from "./DialogProvider";
 
@@ -21,7 +21,15 @@ const HOURS = Array.from({ length: 24 }, (_, h) => h);
 // Daily automatic sending of the trip rental-car notices. Off by default; the
 // notice log guarantees a person who was already notified is never mailed
 // again, however often this runs.
-export function TripNoticeSchedule() {
+interface Props {
+  // Runs the same check the schedule does, right now (see GoogleCalendarSettings).
+  onRecheck: () => void;
+  checking: boolean;
+  checkedAt: Date | null;
+  canRecheck: boolean;
+}
+
+export function TripNoticeSchedule({ onRecheck, checking, checkedAt, canRecheck }: Props) {
   const dialog = useDialog();
   const [sched, setSched] = useState<Schedule | null>(null);
   const [enabled, setEnabled] = useState(false);
@@ -89,6 +97,18 @@ export function TripNoticeSchedule() {
               </div>
             </div>
           )}
+          <div className="flex flex-wrap items-center gap-3">
+            <button className="btn btn-sm btn-outline gap-1" disabled={checking || !canRecheck} onClick={onRecheck}>
+              {checking ? <span className="loading loading-spinner loading-xs" /> : <RefreshCw size={14} />}
+              立即重新檢查
+            </button>
+            <span className="text-xs text-base-content/50">
+              {canRecheck
+                ? "不用等排程：馬上重新讀取日曆與人員目錄，更新上方預覽；有待通知的人會先列出讓你確認再寄。"
+                : "先選擇並儲存要讀取的日曆"}
+              {checkedAt && `；上次檢查：${checkedAt.toLocaleTimeString()}`}
+            </span>
+          </div>
           {sched.last_run_at && (
             <p className="text-xs text-base-content/60">
               上次執行：{new Date(sched.last_run_at).toLocaleString()}；{sched.last_run_summary}

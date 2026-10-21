@@ -150,6 +150,8 @@ export function GoogleCalendarSettings() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [onlyTargets, setOnlyTargets] = useState(false);
   const [sending, setSending] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [checkedAt, setCheckedAt] = useState<Date | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -248,13 +250,15 @@ export function GoogleCalendarSettings() {
     }
   };
 
-  const loadPreview = async () => {
+  const loadPreview = async (): Promise<Preview | null> => {
     setPreviewing(true);
     try {
       const { data } = await apiClient.get<Preview>("/api/settings/google-calendar/events");
       setPreview(data);
+      return data;
     } catch (err) {
       await dialog.error(errorText(err, "讀取活動失敗"));
+      return null;
     } finally {
       setPreviewing(false);
     }
@@ -267,8 +271,8 @@ export function GoogleCalendarSettings() {
       : [];
 
   // One event (calendar_id + event_id) or, with no argument, everything due.
-  const sendNotices = async (only?: PreviewEvent) => {
-    const events = only ? [only] : (preview?.events ?? []);
+  const sendNotices = async (only?: PreviewEvent, fromEvents?: PreviewEvent[]) => {
+    const events = only ? [only] : (fromEvents ?? preview?.events ?? []);
     const recipients = events.flatMap((ev) => pendingFor(ev).map((c) => `${c.name || c.display_name}（${c.email}）← ${ev.summary}`));
     if (recipients.length === 0) { await dialog.success("沒有需要寄出的通知"); return; }
     const shown = recipients.slice(0, 15).join("\n") + (recipients.length > 15 ? `\n…還有 ${recipients.length - 15} 筆` : "");
@@ -291,6 +295,30 @@ export function GoogleCalendarSettings() {
       await dialog.error("寄送失敗：" + errorText(err, ""));
     } finally {
       setSending("");
+    }
+  };
+
+  // Run now the same check the daily schedule does: re-read the calendars and
+  // the directory, refresh the preview, and offer to send whatever is due.
+  // Nothing is mailed without the confirmation sendNotices shows.
+  const recheck = async () => {
+    setChecking(true);
+    try {
+      const data = await loadPreview();
+      if (!data) return;
+      setCheckedAt(new Date());
+      const due = data.events.filter((ev) => ev.target_location && ev.notice_due);
+      const pending = due.flatMap((ev) => pendingFor(ev));
+      const broken = due.filter((ev) => ev.format_missing.length > 0).length;
+      const dirNote = data.directory?.error ? `\n人員目錄讀取失敗：${data.directory.error}` : data.directory && !data.directory.configured ? "\n尚未設定人員目錄" : "";
+      if (pending.length > 0 && !dirNote) { await sendNotices(undefined, data.events); return; }
+      await dialog.success(
+        `檢查完成：共 ${data.events.length} 個活動，通知視窗已開的行程 ${due.length} 個。\n` +
+        (pending.length ? `有 ${pending.length} 人待通知，但人員目錄無法使用，暫不寄出。` : "沒有需要寄出的通知。") +
+        (broken ? `\n其中 ${broken} 個活動格式有問題，不會寄出。` : "") + dirNote,
+      );
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -615,7 +643,14 @@ export function GoogleCalendarSettings() {
             </section>
 
             {/* Step 5 */}
-            {status.connected && <TripNoticeSchedule />}
+            {status.connected && (
+              <TripNoticeSchedule
+                onRecheck={recheck}
+                checking={checking || previewing || sending !== ""}
+                checkedAt={checkedAt}
+                canRecheck={status.selected_calendar_ids.length > 0}
+              />
+            )}
           </div>
         )}
 
