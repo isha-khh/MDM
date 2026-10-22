@@ -121,3 +121,6 @@ var Migration039SQL string
 
 //go:embed migrations/040_trip_notice_schedule.up.sql
 var Migration040SQL string
+
+//go:embed migrations/041_half_day_rentals.up.sql
+var Migration041SQL string
