@@ -14,7 +14,7 @@ import type { ColDef, ICellRendererParams } from "ag-grid-enterprise";
 import { DataGrid } from "../components/DataGrid";
 import { type ChecklistItem, type ChecklistAnswers, isChecklistItemFilled } from "../lib/checklist";
 import { ChecklistFields } from "../components/ChecklistFields";
-import { type Rental, type RentalGroup, type DailyReport, groupByRentalNumber } from "../lib/rentalTypes";
+import { type Rental, type RentalGroup, type DailyReport, groupByRentalNumber, periodLabel } from "../lib/rentalTypes";
 import { minExtendDate } from "../lib/dates";
 
 interface UserOption {
@@ -89,6 +89,7 @@ export function Rentals() {
   const [borrowDate, setBorrowDate] = useState(todayStr());
   const [expectedReturn, setExpectedReturn] = useState("");
   const [multiDayReason, setMultiDayReason] = useState("");
+  const [period, setPeriod] = useState<"full" | "am" | "pm">("full");
   const [notes, setNotes] = useState("");
   const [creating, setCreating] = useState(false);
   // Asset mode
@@ -134,6 +135,7 @@ export function Rentals() {
     setBorrowDate(todayStr());
     setExpectedReturn("");
     setMultiDayReason("");
+    setPeriod("full");
     setNotes("");
     setCatLines([{ categoryId: "", quantity: 1 }]);
   };
@@ -153,7 +155,9 @@ export function Rentals() {
         borrower_id: borrowerId,
         purpose,
         borrow_date: borrowDate || null,
-        expected_return: expectedReturn || null,
+        // 半天租借限單日：歸還日 = 借出日
+        expected_return: period !== "full" ? borrowDate : expectedReturn || null,
+        period,
         multi_day_reason: multiDayReason,
         notes,
       };
@@ -198,18 +202,28 @@ export function Rentals() {
     } catch { return []; }
   };
 
+  // 所選資產的分類是否全部開放半天出借（決定是否顯示時段選項）
+  const [halfDayHit, setHalfDayHit] = useState(false);
+
   useEffect(() => {
-    if (!isMultiDay) { setDailyTrackingHit(false); return; }
     let cancelled = false;
     (async () => {
       const categoryIds = await resolveCreateCategoryIds();
-      if (categoryIds.length === 0) { if (!cancelled) setDailyTrackingHit(false); return; }
+      if (categoryIds.length === 0) {
+        if (!cancelled) { setDailyTrackingHit(false); setHalfDayHit(false); setPeriod("full"); }
+        return;
+      }
       try {
         const { data } = await apiClient.get("/api/category-rental-rules/resolve", {
           params: { category_ids: categoryIds.join(",") },
         });
-        if (!cancelled) setDailyTrackingHit(!!data.daily_tracking_required);
-      } catch { if (!cancelled) setDailyTrackingHit(false); }
+        if (cancelled) return;
+        setDailyTrackingHit(isMultiDay && !!data.daily_tracking_required);
+        setHalfDayHit(!!data.half_day_enabled);
+        if (!data.half_day_enabled) setPeriod("full");
+      } catch {
+        if (!cancelled) { setDailyTrackingHit(false); setHalfDayHit(false); setPeriod("full"); }
+      }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -612,9 +626,14 @@ export function Rentals() {
     defs.push({
       headerName: "借出日期",
       field: "borrow_date",
-      width: 120,
+      width: 170,
       cellClass: "text-sm opacity-70",
-      valueFormatter: (p) => p.value ? new Date(p.value as string).toLocaleDateString() : "-",
+      valueFormatter: (p) => {
+        if (!p.value) return "-";
+        const d = new Date(p.value as string).toLocaleDateString();
+        const per = (p.data as RentalGroup | undefined)?.period;
+        return per && per !== "full" ? `${d} ${periodLabel[per]}` : d;
+      },
     });
     defs.push({
       headerName: "預計歸還",
@@ -847,10 +866,25 @@ export function Rentals() {
                   <label className="label"><span className="label-text font-medium">借出日期</span></label>
                   <input type="date" value={borrowDate} onChange={(e) => setBorrowDate(e.target.value)} className="input input-bordered input-sm" />
                 </div>
-                <div className="form-control">
-                  <label className="label"><span className="label-text font-medium">預計歸還日期</span></label>
-                  <input type="date" value={expectedReturn} onChange={(e) => setExpectedReturn(e.target.value)} className="input input-bordered input-sm" />
-                </div>
+                {halfDayHit && (
+                  <div className="form-control">
+                    <label className="label">
+                      <span className="label-text font-medium">借用時段</span>
+                      <span className="label-text-alt opacity-60">此分類可半天出借</span>
+                    </label>
+                    <select value={period} onChange={(e) => setPeriod(e.target.value as "full" | "am" | "pm")} className="select select-bordered select-sm">
+                      <option value="full">全天（可跨日）</option>
+                      <option value="am">上午</option>
+                      <option value="pm">下午</option>
+                    </select>
+                  </div>
+                )}
+                {period === "full" && (
+                  <div className="form-control">
+                    <label className="label"><span className="label-text font-medium">預計歸還日期</span></label>
+                    <input type="date" value={expectedReturn} onChange={(e) => setExpectedReturn(e.target.value)} className="input input-bordered input-sm" />
+                  </div>
+                )}
                 <div className="form-control">
                   <label className="label"><span className="label-text font-medium">用途</span></label>
                   <input type="text" value={purpose} onChange={(e) => setPurpose(e.target.value)} className="input input-bordered input-sm" placeholder="借用用途" />

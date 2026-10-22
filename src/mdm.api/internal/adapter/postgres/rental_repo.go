@@ -23,7 +23,7 @@ const rentalSelectColumns = `r.id, r.asset_id, r.device_udid, r.borrower_id, r.b
 	             COALESCE(a.asset_number,'') as asset_number, COALESCE(a.name,'') as asset_name,
 	             a.custodian_id, COALESCE(a.custodian_name,'') as custodian_name,
 	             r.rental_number, r.is_archived, r.return_checklist, r.return_notes, r.multi_day_reason, a.category_id,
-	             r.return_checklist_reported, r.return_reported_by, r.return_reported_at, r.return_verified_by, r.cross_day_reason`
+	             r.return_checklist_reported, r.return_reported_by, r.return_reported_at, r.return_verified_by, r.cross_day_reason, r.period`
 
 const rentalFromJoin = `FROM rentals r
 	LEFT JOIN assets a ON a.id = r.asset_id
@@ -47,7 +47,7 @@ func scanRental(rows interface {
 		&rental.CustodianID, &rental.CustodianName,
 		&rental.RentalNumber, &rental.IsArchived, &checklistJSON, &rental.ReturnNotes,
 		&rental.MultiDayReason, &rental.CategoryID,
-		&checklistReportedJSON, &rental.ReturnReportedBy, &returnReportedAt, &rental.ReturnVerifiedBy, &rental.CrossDayReason,
+		&checklistReportedJSON, &rental.ReturnReportedBy, &returnReportedAt, &rental.ReturnVerifiedBy, &rental.CrossDayReason, &rental.Period,
 	)
 	if err != nil {
 		return nil, err
@@ -120,10 +120,10 @@ func (r *RentalRepo) Create(ctx context.Context, rental *domain.Rental) (string,
 		borrowDate = time.Now()
 	}
 	err := r.pool.QueryRow(ctx,
-		`INSERT INTO rentals (asset_id, device_udid, borrower_id, borrower_name, purpose, borrow_date, expected_return, notes, rental_number, multi_day_reason)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+		`INSERT INTO rentals (asset_id, device_udid, borrower_id, borrower_name, purpose, borrow_date, expected_return, notes, rental_number, multi_day_reason, period)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
 		rental.AssetID, udid, rental.BorrowerID, rental.BorrowerName, rental.Purpose,
-		borrowDate, rental.ExpectedReturn, rental.Notes, rental.RentalNumber, rental.MultiDayReason,
+		borrowDate, rental.ExpectedReturn, rental.Notes, rental.RentalNumber, rental.MultiDayReason, periodOrFull(rental.Period),
 	).Scan(&id)
 	return id, err
 }
@@ -302,4 +302,11 @@ func (r *RentalRepo) CheckDeviceAvailability(ctx context.Context, udid string) (
 		 FROM devices d LEFT JOIN assets a ON a.device_udid=d.udid WHERE d.udid=$1`, udid,
 	).Scan(&assetStatus, &isRented, &isLostMode)
 	return assetStatus, isRented, isLostMode, err
+}
+
+func periodOrFull(p string) string {
+	if p == "" {
+		return "full"
+	}
+	return p
 }
