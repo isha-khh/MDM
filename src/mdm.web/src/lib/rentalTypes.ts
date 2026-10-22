@@ -45,6 +45,7 @@ export interface Rental {
   return_checklist_reported?: ChecklistAnswers;
   cross_day_reason?: string;
   multi_day_reason?: string;
+  period?: "full" | "am" | "pm";
   daily_tracking_required?: boolean;
   pending_extension?: RentalExtension | null;
 }
@@ -68,6 +69,7 @@ export interface RentalGroup {
   return_checklist_reported?: ChecklistAnswers;
   cross_day_reason?: string;
   multi_day_reason?: string;
+  period?: "full" | "am" | "pm";
   daily_tracking_required?: boolean;
   pending_extension?: RentalExtension | null;
 }
@@ -109,6 +111,7 @@ export function groupByRentalNumber(rentals: Rental[]): RentalGroup[] {
       return_checklist_reported: first.return_checklist_reported,
       cross_day_reason: first.cross_day_reason,
       multi_day_reason: first.multi_day_reason,
+      period: first.period,
       pending_extension: first.pending_extension,
       // Union across the batch, matching the backend's own union policy for
       // "does this batch touch any daily-tracking category".
@@ -118,3 +121,5 @@ export function groupByRentalNumber(rentals: Rental[]): RentalGroup[] {
   groups.sort((a, b) => b.rental_number - a.rental_number);
   return groups;
 }
+
+export const periodLabel: Record<string, string> = { full: "全天", am: "上午", pm: "下午" };

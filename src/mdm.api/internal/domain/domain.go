@@ -242,8 +242,11 @@ type Rental struct {
 	// flagged daily_tracking_required (see CategoryRentalRule) — e.g. a
 	// multi-day vehicle trip. Empty for ordinary single-day rentals.
 	MultiDayReason string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// Period is "full" (whole day, default), "am" or "pm". Half-day periods
+	// are only allowed on single-day rentals of categories with HalfDayEnabled.
+	Period    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 	// Joined fields (read-only)
 	DeviceName   string
 	DeviceSerial string
@@ -262,8 +265,11 @@ type Rental struct {
 type CategoryRentalRule struct {
 	CategoryID            string
 	DailyTrackingRequired bool
-	UpdatedBy             *string
-	UpdatedAt             time.Time
+	// HalfDayEnabled lets rentals of this category be booked for just the
+	// morning or afternoon (Rental.Period), resolved with the same ancestor walk.
+	HalfDayEnabled bool
+	UpdatedBy      *string
+	UpdatedAt      time.Time
 }
 
 // RentalDailyReport is one day's checklist for a daily_tracking_required

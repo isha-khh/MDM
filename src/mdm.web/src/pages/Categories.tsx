@@ -56,17 +56,20 @@ export function Categories() {
   // 逐日追蹤規則（僅葉節點分類適用；跨日租借需說明、期間每天各填一份 checklist，
   // 用於車輛里程等記錄）。以 category_id 為 key，值 = daily_tracking_required。
   const [rentalRules, setRentalRules] = useState<Record<string, boolean>>({});
+  // 允許半天出借（借用人可選上午／下午時段，同一天可由不同人分段借用）。
+  const [halfDayRules, setHalfDayRules] = useState<Record<string, boolean>>({});
   const [savingRuleId, setSavingRuleId] = useState<string | null>(null);
 
   const loadRentalRules = async (cats: Category[]) => {
     const leafIds = cats.filter((c) => !cats.some((child) => child.parent_id === c.id)).map((c) => c.id);
-    const entries = await Promise.all(leafIds.map(async (id): Promise<[string, boolean]> => {
+    const entries = await Promise.all(leafIds.map(async (id): Promise<[string, boolean, boolean]> => {
       try {
         const { data } = await apiClient.get(`/api/categories/${id}/rental-rule`);
-        return [id, !!data.daily_tracking_required];
-      } catch { return [id, false]; }
+        return [id, !!data.daily_tracking_required, !!data.half_day_enabled];
+      } catch { return [id, false, false]; }
     }));
-    setRentalRules(Object.fromEntries(entries));
+    setRentalRules(Object.fromEntries(entries.map(([id, d]) => [id, d])));
+    setHalfDayRules(Object.fromEntries(entries.map(([id, , h]) => [id, h])));
   };
 
   const load = async () => {
@@ -87,6 +90,15 @@ export function Categories() {
     try {
       await apiClient.put(`/api/categories/${id}/rental-rule`, { daily_tracking_required: value });
       setRentalRules((prev) => ({ ...prev, [id]: value }));
+    } catch { await dialog.error("設定失敗"); }
+    finally { setSavingRuleId(null); }
+  };
+
+  const toggleHalfDay = async (id: string, value: boolean) => {
+    setSavingRuleId(id);
+    try {
+      await apiClient.put(`/api/categories/${id}/rental-rule`, { half_day_enabled: value });
+      setHalfDayRules((prev) => ({ ...prev, [id]: value }));
     } catch { await dialog.error("設定失敗"); }
     finally { setSavingRuleId(null); }
   };
@@ -309,6 +321,19 @@ export function Categories() {
                       onChange={(e) => toggleDailyTracking(cat.id, e.target.checked)}
                     />
                     逐日追蹤
+                  </label>
+                  <label
+                    className="flex items-center gap-1 text-xs opacity-70 cursor-pointer whitespace-nowrap"
+                    title="開啟後：借用人可選擇只借上午或下午（限單日），同一天的另一半時段可由其他人接著借"
+                  >
+                    <input
+                      type="checkbox"
+                      className="toggle toggle-xs"
+                      checked={!!halfDayRules[cat.id]}
+                      disabled={savingRuleId === cat.id}
+                      onChange={(e) => toggleHalfDay(cat.id, e.target.checked)}
+                    />
+                    可半天出借
                   </label>
                 </>
               )}

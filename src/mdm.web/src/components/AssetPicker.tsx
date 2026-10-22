@@ -23,6 +23,9 @@ interface AssetItem {
   // most (non-vehicle) assets show nothing extra here.
   last_return_location?: { lat?: number; lng?: number; address?: string } | null;
   last_return_at?: string | null;
+  // 該分類允許半天出借；booked_slots = 已被預約的半天時段（"YYYY-MM-DD am|pm"）
+  half_day_enabled?: boolean;
+  booked_slots?: string[];
 }
 
 interface AssetPickerProps {
@@ -266,6 +269,11 @@ export function AssetPicker({ selected, onChange, showFilters, endpoint = "/api/
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium truncate">{primary}</div>
                     <div className="text-xs opacity-50 truncate">{secondary || "-"}</div>
+                    {a.booked_slots && a.booked_slots.length > 0 && (
+                      <div className="text-xs text-warning truncate">
+                        已預約：{a.booked_slots.map((s) => s.replace(" am", " 上午").replace(" pm", " 下午")).join("、")}
+                      </div>
+                    )}
                     {a.last_return_location && (
                       <div className="text-xs text-info flex items-center gap-1 truncate">
                         <MapPin size={10} className="flex-shrink-0" />

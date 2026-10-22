@@ -229,7 +229,10 @@ func (c *RentalController) handlePickableAssets(w http.ResponseWriter, r *http.R
 		CategoryName       string                 `json:"category_name"`
 		LastReturnLocation map[string]interface{} `json:"last_return_location,omitempty"`
 		LastReturnAt       *string                `json:"last_return_at,omitempty"`
+		HalfDayEnabled     bool                   `json:"half_day_enabled"`
+		BookedSlots        []string               `json:"booked_slots"`
 	}
+	cats, _ := c.categoryRepo.List(r.Context())
 	rows := make([]row, 0, len(items))
 	for _, it := range items {
 		rr := row{
@@ -238,6 +241,10 @@ func (c *RentalController) handlePickableAssets(w http.ResponseWriter, r *http.R
 			SerialNumber: it.SerialNumber, Model: it.Model, OSVersion: it.OSVersion,
 			AssetStatus: it.AssetStatus, CategoryID: it.CategoryID, CategoryName: it.CategoryName,
 			LastReturnLocation: it.LastReturnLocation,
+			BookedSlots:        it.BookedSlots,
+		}
+		if it.CategoryID != nil {
+			rr.HalfDayEnabled, _ = c.rentalRuleRepo.ResolveHalfDayEnabled(r.Context(), cats, *it.CategoryID)
 		}
 		if it.LastReturnAt != nil {
 			s := it.LastReturnAt.Format(time.RFC3339)
@@ -299,7 +306,7 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 				"custodian_id": rl.CustodianID, "custodian_name": rl.CustodianName,
 				"rental_number": rl.RentalNumber, "is_archived": rl.IsArchived,
 				"return_checklist": rl.ReturnChecklist, "return_notes": rl.ReturnNotes,
-				"multi_day_reason": rl.MultiDayReason, "category_id": rl.CategoryID,
+				"multi_day_reason": rl.MultiDayReason, "category_id": rl.CategoryID, "period": rl.Period,
 				"return_checklist_reported": rl.ReturnChecklistReported,
 				"return_reported_by":        rl.ReturnReportedBy,
 				"cross_day_reason":          rl.CrossDayReason,
@@ -347,6 +354,9 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 			// calendar day AND at least one asset's category is flagged
 			// daily_tracking_required (e.g. a multi-day vehicle trip).
 			MultiDayReason string `json:"multi_day_reason"`
+			// Period: "full" (default), "am" or "pm"; half-day needs every
+			// asset's category to have half_day_enabled.
+			Period string `json:"period"`
 			// Category mode: multiple {category_id, quantity} lines.
 			CategoryLines []struct {
 				CategoryID string `json:"category_id"`
@@ -358,13 +368,54 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
+		// Phase 1 of 租借 2.1: borrow_date is fillable at creation (unrestricted
+		// range), defaulting to today when omitted — same as the old DB
+		// DEFAULT now() behavior, just made explicit so it can also be
+		// compared against expected_return below.
+		borrowDate := time.Now()
+		if body.BorrowDate != nil && strings.TrimSpace(*body.BorrowDate) != "" {
+			t, err := time.Parse("2006-01-02", *body.BorrowDate)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid borrow_date")
+				return
+			}
+			borrowDate = t
+		}
+
+		var expectedReturn *time.Time
+		if body.ExpectedReturn != nil && *body.ExpectedReturn != "" {
+			t, err := time.Parse("2006-01-02", *body.ExpectedReturn)
+			if err == nil {
+				expectedReturn = &t
+			}
+		}
+
+		// Half-day booking (am/pm): single-day only. Whether the categories
+		// allow it is checked once the assets are resolved, below.
+		period := strings.TrimSpace(body.Period)
+		if period == "" {
+			period = "full"
+		}
+		if period != "full" && period != "am" && period != "pm" {
+			writeError(w, http.StatusBadRequest, "invalid period")
+			return
+		}
+		if period != "full" {
+			if expectedReturn == nil {
+				expectedReturn = &borrowDate
+			} else if !sameCalendarDay(borrowDate, *expectedReturn) {
+				writeError(w, http.StatusBadRequest, "半天租借僅限單日（借出日期須等於預計歸還日期）")
+				return
+			}
+		}
+
 		// Category mode: auto-pick available assets for each line.
 		if len(body.AssetIDs) == 0 && len(body.CategoryLines) > 0 {
 			for _, line := range body.CategoryLines {
 				if line.CategoryID == "" || line.Quantity <= 0 {
 					continue
 				}
-				ids, err := c.assetRepo.ListAvailableByCategory(r.Context(), line.CategoryID, line.Quantity)
+				ids, err := c.assetRepo.ListAvailableByCategory(r.Context(), line.CategoryID, period, borrowDate, line.Quantity)
 				if err != nil {
 					writeError(w, http.StatusInternalServerError, err.Error())
 					return
@@ -419,7 +470,7 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 				unavailable = append(unavailable, aid+" (不存在)")
 				continue
 			}
-			status, isRented, name, _ := c.assetRepo.CheckAssetAvailability(r.Context(), aid)
+			status, isRented, name, _ := c.assetRepo.CheckAssetAvailability(r.Context(), aid, period, borrowDate)
 			label := name
 			if label == "" {
 				label = a.AssetNumber
@@ -447,29 +498,29 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		rentalNumber, _ := c.rentalRepo.NextRentalNumber(r.Context())
-
-		// Phase 1 of 租借 2.1: borrow_date is fillable at creation (unrestricted
-		// range), defaulting to today when omitted — same as the old DB
-		// DEFAULT now() behavior, just made explicit so it can also be
-		// compared against expected_return below.
-		borrowDate := time.Now()
-		if body.BorrowDate != nil && strings.TrimSpace(*body.BorrowDate) != "" {
-			t, err := time.Parse("2006-01-02", *body.BorrowDate)
+		if period != "full" {
+			cats, err := c.categoryRepo.List(r.Context())
 			if err != nil {
-				writeError(w, http.StatusBadRequest, "invalid borrow_date")
+				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			borrowDate = t
-		}
-
-		var expectedReturn *time.Time
-		if body.ExpectedReturn != nil && *body.ExpectedReturn != "" {
-			t, err := time.Parse("2006-01-02", *body.ExpectedReturn)
-			if err == nil {
-				expectedReturn = &t
+			for _, it := range resolved {
+				ok := false
+				if it.categoryID != nil && *it.categoryID != "" {
+					ok, err = c.rentalRuleRepo.ResolveHalfDayEnabled(r.Context(), cats, *it.categoryID)
+					if err != nil {
+						writeError(w, http.StatusInternalServerError, err.Error())
+						return
+					}
+				}
+				if !ok {
+					writeError(w, http.StatusBadRequest, it.name+" 的分類不開放半天出借")
+					return
+				}
 			}
 		}
+
+		rentalNumber, _ := c.rentalRepo.NextRentalNumber(r.Context())
 
 		// Vehicle "daily tracking" rule: a booking spanning more than one
 		// calendar day, where any involved asset's category resolves to
@@ -501,6 +552,7 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 				Purpose:        body.Purpose,
 				BorrowDate:     borrowDate,
 				MultiDayReason: multiDayReason,
+				Period:         period,
 				ExpectedReturn: expectedReturn,
 				Notes:          body.Notes,
 				RentalNumber:   rentalNumber,
