@@ -42,6 +42,14 @@ type Config struct {
 	DEPTemplateDir  string        // dir holding mac.json/ipad.json/iphone.json
 	DEPPollInterval time.Duration // how often to poll ABM
 	DEPAutoAssign   bool          // master switch; must be true to start scheduler
+
+	// Integration API (reservations for the dispatch system). It is served on
+	// its own listener so it can be exposed (Cloudflare tunnel + WAF) without
+	// exposing the web UI's API; empty IntegrationListenAddr switches it off.
+	IntegrationListenAddr string
+	// IntegrationTrustedProxies are the CIDRs of the hops in front of the
+	// listener (the tunnel daemon) whose CF-Connecting-IP header is believed.
+	IntegrationTrustedProxies []string
 }
 
 type SMTPConfig struct {
@@ -116,6 +124,10 @@ func Load() *Config {
 		DEPTemplateDir:  envOr("DEP_TEMPLATE_DIR", "./dep-profiles"),
 		DEPPollInterval: pollInterval,
 		DEPAutoAssign:   envOr("DEP_AUTO_ASSIGN", "false") == "true",
+
+		IntegrationListenAddr: envOr("INTEGRATION_LISTEN_ADDR", ""),
+		IntegrationTrustedProxies: strings.Split(
+			envOr("INTEGRATION_TRUSTED_PROXIES", "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"), ","),
 	}
 }
 

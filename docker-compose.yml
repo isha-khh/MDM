@@ -21,6 +21,13 @@ services:
       WEBSOCKET_URL: ${WEBSOCKET_URL}
       VPP_TOKEN_PATH: ${VPP_TOKEN_PATH:-}
       LISTEN_ADDR: ":8080"
+      # 派發系統整合 API（獨立連接埠，見 docs/dispatch-integration.md）。留空 = 不啟用。
+      INTEGRATION_LISTEN_ADDR: ${INTEGRATION_LISTEN_ADDR:-}
+      INTEGRATION_TRUSTED_PROXIES: ${INTEGRATION_TRUSTED_PROXIES:-}
+    # cloudflared 與 api 在同一個 compose 網路時，tunnel 直接指向 http://api:8081 即可，不用開 port；
+    # cloudflared 跑在主機上時，打開下面這行（只綁本機，不對外）：
+    # ports:
+    #   - "127.0.0.1:8081:8081"
     restart: unless-stopped
 
   web:

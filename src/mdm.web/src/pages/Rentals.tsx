@@ -30,6 +30,7 @@ const statusConfig: Record<string, { label: string; badge: string; icon: React.R
   pending_return: { label: "待核對", badge: "badge-info",    icon: <Clock size={14} /> },
   returned:       { label: "已歸還", badge: "badge-ghost",   icon: <RotateCcw size={14} /> },
   rejected:       { label: "已拒絕", badge: "badge-error",   icon: <X size={14} /> },
+  cancelled:      { label: "已取消", badge: "badge-ghost",   icon: <X size={14} /> },
 };
 
 async function downloadExportExcel(ids?: string[]) {
@@ -758,6 +759,7 @@ export function Rentals() {
             <option value="pending_return">待核對</option>
             <option value="returned">已歸還</option>
             <option value="rejected">已拒絕</option>
+            <option value="cancelled">已取消</option>
           </select>
           <label className="flex items-center gap-1.5 cursor-pointer text-sm">
             <input

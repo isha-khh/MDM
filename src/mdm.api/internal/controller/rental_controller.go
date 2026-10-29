@@ -271,7 +271,7 @@ func (c *RentalController) handlePickableAssets(w http.ResponseWriter, r *http.R
 // @Accept json
 // @Produce json
 // @Security BearerAuth
-// @Param status query string false "狀態篩選" Enums(pending,approved,active,returned,rejected)
+// @Param status query string false "狀態篩選" Enums(pending,approved,active,pending_return,returned,rejected,cancelled)
 // @Param device_udid query string false "裝置 UDID"
 // @Param show_archived query string false "顯示已歸檔" Enums(true,false)
 // @Param body body swagRentalReq false "建立借用單（POST）"
@@ -1159,7 +1159,7 @@ func (c *RentalController) handleExport(w http.ResponseWriter, r *http.Request) 
 
 	statusLabels := map[string]string{
 		"pending": "待核准", "approved": "已核准", "active": "借出中",
-		"returned": "已歸還", "rejected": "已拒絕",
+		"returned": "已歸還", "rejected": "已拒絕", "cancelled": "已取消",
 	}
 
 	// Dynamic checklist columns (Phase 2a): scan the keys that actually

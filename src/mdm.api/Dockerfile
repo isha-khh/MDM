@@ -11,5 +11,5 @@ RUN apk add --no-cache ca-certificates
 COPY --from=builder /mdm-server /mdm-server
 COPY --from=builder /app/db /db
 WORKDIR /
-EXPOSE 8080
+EXPOSE 8080 8081
 ENTRYPOINT ["/mdm-server"]

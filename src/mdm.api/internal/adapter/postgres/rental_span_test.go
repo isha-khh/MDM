@@ -2,10 +2,6 @@ package postgres
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -13,56 +9,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/anthropics/mdm-server/internal/domain"
+	"github.com/anthropics/mdm-server/internal/testutil/pgtest"
 )
 
-// These tests run against a real PostgreSQL: the behaviour under test is SQL.
-// Set TEST_DATABASE_URL to any database on a server you can create databases
-// on (e.g. postgres://user:pass@localhost:5432/postgres); each test run uses
-// its own temporary database with every migration applied, and drops it after.
-func testPool(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	admin := os.Getenv("TEST_DATABASE_URL")
-	if admin == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-	ctx := context.Background()
-	ap, err := pgxpool.New(ctx, admin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("mdm_test_%d", time.Now().UnixNano())
-	if _, err := ap.Exec(ctx, "CREATE DATABASE "+name); err != nil {
-		ap.Close()
-		t.Fatal(err)
-	}
-	cfg, err := pgxpool.ParseConfig(admin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.Database = name
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		ap.Exec(ctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
-		ap.Close()
-	})
-	files, _ := filepath.Glob("../../db/migrations/*.up.sql")
-	sort.Strings(files)
-	for _, f := range files {
-		sqlText, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		// like the server at boot: a failing migration is logged, not fatal
-		if _, err := pool.Exec(ctx, string(sqlText)); err != nil {
-			t.Logf("migration %s: %v", filepath.Base(f), err)
-		}
-	}
-	return pool
-}
+// These tests run against a real PostgreSQL: see pgtest.
+func testPool(t *testing.T) *pgxpool.Pool { return pgtest.Pool(t) }
 
 type seed struct {
 	t    *testing.T

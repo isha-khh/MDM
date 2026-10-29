@@ -75,6 +75,8 @@ docker-compose up -d
 | Variable | Default | Description |
 |----------|---------|-------------|
 | LISTEN_ADDR | :8080 | Server listen address |
+| INTEGRATION_LISTEN_ADDR | (empty = off) | Listen address of the dispatch-system reservation API (see docs/dispatch-integration.md) |
+| INTEGRATION_TRUSTED_PROXIES | loopback + private ranges | CIDRs whose `CF-Connecting-IP` header is trusted for the integration API |
 | DATABASE_URL | postgres://mdm:mdm@localhost:5432/mdm?sslmode=disable | PostgreSQL DSN |
 | JWT_SECRET | change-me-in-production | JWT signing secret |
 | MICROMDM_URL | (required) | MicroMDM server URL |
