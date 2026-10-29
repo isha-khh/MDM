@@ -93,6 +93,8 @@ func main() {
 	categoryNoticeRepo := postgres.NewCategoryNoticeRepo(pool)
 	categoryNoticeImageRepo := postgres.NewCategoryNoticeImageRepo(pool)
 	rentalExtensionRepo := postgres.NewRentalExtensionRepo(pool)
+	integrationRepo := postgres.NewIntegrationRepo(pool)
+	reservationRepo := postgres.NewReservationRepo(pool)
 
 	// Auth helper (module-level permission checks)
 	authHelper := middleware.NewAuthHelper(cfg.JWTSecret, permissionRepo)
@@ -295,6 +297,7 @@ func main() {
 		controller.NewProfileController(profileRepo, authHelper),
 		controller.NewNotificationController(notificationRepo, authHelper),
 		controller.NewSettingsController(mailSettingsRepo, smtpSender, authHelper),
+		controller.NewIntegrationSettingsController(integrationRepo, auditRepo, authHelper, cfg.IntegrationListenAddr),
 	)
 
 	// CORS
@@ -314,12 +317,41 @@ func main() {
 		Handler: corsHandler,
 	}
 
+	// Integration API: its own listener, API-key auth only (no web UI, no JWT).
+	var integrationSrv *http.Server
+	if cfg.IntegrationListenAddr != "" {
+		integrationAuth, err := middleware.NewIntegrationAuth(integrationRepo, cfg.IntegrationTrustedProxies)
+		if err != nil {
+			log.Fatalf("integration API: %v", err)
+		}
+		reservationSvc := service.NewReservationService(integrationRepo, reservationRepo, userRepo)
+		integrationSrv = &http.Server{
+			Addr:              cfg.IntegrationListenAddr,
+			Handler:           controller.NewIntegrationController(reservationSvc, integrationAuth).Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+		go func() {
+			log.Printf("Integration API listening on %s", cfg.IntegrationListenAddr)
+			if err := integrationSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("integration server: %v", err)
+			}
+		}()
+	} else {
+		log.Printf("[integration-api] disabled (INTEGRATION_LISTEN_ADDR not set)")
+	}
+
 	// Graceful shutdown
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		log.Println("shutting down...")
+		if integrationSrv != nil {
+			integrationSrv.Shutdown(context.Background())
+		}
 		srv.Shutdown(context.Background())
 	}()
 
@@ -331,7 +363,7 @@ func main() {
 
 func runMigrations(pool *pgxpool.Pool) {
 	ctx := context.Background()
-	for i, sql := range []string{db.MigrationSQL, db.Migration002SQL, db.Migration003SQL, db.Migration004SQL, db.Migration005SQL, db.Migration006SQL, db.Migration007SQL, db.Migration008SQL, db.Migration009SQL, db.Migration010SQL, db.Migration011SQL, db.Migration012SQL, db.Migration013SQL, db.Migration014SQL, db.Migration015SQL, db.Migration016SQL, db.Migration017SQL, db.Migration018SQL, db.Migration019SQL, db.Migration020SQL, db.Migration021SQL, db.Migration022SQL, db.Migration023SQL, db.Migration024SQL, db.Migration025SQL, db.Migration026SQL, db.Migration027SQL, db.Migration028SQL, db.Migration029SQL, db.Migration030SQL, db.Migration031SQL, db.Migration032SQL, db.Migration033SQL, db.Migration034SQL, db.Migration041SQL, db.Migration042SQL} {
+	for i, sql := range []string{db.MigrationSQL, db.Migration002SQL, db.Migration003SQL, db.Migration004SQL, db.Migration005SQL, db.Migration006SQL, db.Migration007SQL, db.Migration008SQL, db.Migration009SQL, db.Migration010SQL, db.Migration011SQL, db.Migration012SQL, db.Migration013SQL, db.Migration014SQL, db.Migration015SQL, db.Migration016SQL, db.Migration017SQL, db.Migration018SQL, db.Migration019SQL, db.Migration020SQL, db.Migration021SQL, db.Migration022SQL, db.Migration023SQL, db.Migration024SQL, db.Migration025SQL, db.Migration026SQL, db.Migration027SQL, db.Migration028SQL, db.Migration029SQL, db.Migration030SQL, db.Migration031SQL, db.Migration032SQL, db.Migration033SQL, db.Migration034SQL, db.Migration041SQL, db.Migration042SQL, db.Migration043SQL} {
 		if _, err := pool.Exec(ctx, sql); err != nil {
 			log.Printf("migration %d: %v (may already be applied)", i+1, err)
 		} else {

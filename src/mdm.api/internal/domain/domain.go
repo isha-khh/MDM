@@ -216,7 +216,7 @@ type Rental struct {
 	ApproverName    string
 	CustodianID     *string
 	CustodianName   string
-	Status          string // pending, approved, active, pending_return, returned, rejected
+	Status          string // pending, approved, active, pending_return, returned, rejected, cancelled
 	Purpose         string
 	BorrowDate      time.Time
 	ExpectedReturn  *time.Time

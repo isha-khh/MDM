@@ -2,9 +2,11 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/anthropics/mdm-server/internal/domain"
@@ -48,13 +50,44 @@ func (r *UserRepo) GetByUsername(ctx context.Context, username string) (*domain.
 	return u, nil
 }
 
+// GetByEmail matches the email without regard to case (identity providers and
+// people disagree about capitals); an exact match wins if several differ only in case.
 func (r *UserRepo) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
 	u, err := scanUser(r.pool.QueryRow(ctx,
-		`SELECT `+userSelectCols+` FROM users WHERE email=$1`, email))
+		`SELECT `+userSelectCols+` FROM users WHERE email <> '' AND lower(email)=lower($1)
+		 ORDER BY (email=$1) DESC, created_at LIMIT 1`, email))
 	if err != nil {
 		return nil, fmt.Errorf("user not found: %w", err)
 	}
 	return u, nil
+}
+
+// FindByEmailFold returns every user with the email (case-insensitive).
+func (r *UserRepo) FindByEmailFold(ctx context.Context, email string) ([]*domain.User, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+userSelectCols+` FROM users WHERE email <> '' AND lower(email)=lower($1) ORDER BY created_at`, email)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*domain.User
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// FindByUsername is GetByUsername that reports "no such user" as nil, not an error.
+func (r *UserRepo) FindByUsername(ctx context.Context, username string) (*domain.User, error) {
+	u, err := scanUser(r.pool.QueryRow(ctx, `SELECT `+userSelectCols+` FROM users WHERE username=$1`, username))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return u, err
 }
 
 func (r *UserRepo) GetBySSOSub(ctx context.Context, sub string) (*domain.User, error) {

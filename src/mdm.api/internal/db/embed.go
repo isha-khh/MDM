@@ -109,3 +109,6 @@ var Migration041SQL string
 
 //go:embed migrations/042_rental_time_span.up.sql
 var Migration042SQL string
+
+//go:embed migrations/043_dispatch_integration.up.sql
+var Migration043SQL string
