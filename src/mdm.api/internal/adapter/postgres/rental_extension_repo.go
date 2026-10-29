@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -16,7 +17,50 @@ var (
 	ErrExtensionNotPending    = errors.New("此續借申請已經處理過了")
 )
 
+// ErrExtensionConflict: the extended period would overlap another open rental
+// or reservation of one of the same assets.
+var ErrExtensionConflict = errors.New("續借的期間與這個資產的其他租借或預約重疊")
+
 type RentalExtensionRepo struct{ pool *pgxpool.Pool }
+
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// extensionConflictSQL is true when moving a rental batch's end to the
+// requested date would overlap another open rental of any of its assets. The
+// checked window runs from where the batch's span ends now to its new end: the
+// requested date at the same clock time as a timed booking's end, or the end of
+// the requested day for a date-based one.
+const extensionConflictSQL = `
+	SELECT EXISTS (
+	  SELECT 1
+	  FROM (
+	    SELECT me.asset_id, me.rental_number,
+	           upper(rental_span(me)) AS lo,
+	           CASE WHEN me.end_at IS NULL
+	                THEN (($2::date + 1)::timestamp) AT TIME ZONE 'Asia/Taipei'
+	                ELSE (($2::date)::timestamp + (me.end_at AT TIME ZONE 'Asia/Taipei')::time) AT TIME ZONE 'Asia/Taipei'
+	           END AS hi
+	    FROM rentals me
+	    WHERE me.rental_number = $1 AND me.asset_id IS NOT NULL
+	  ) w
+	  JOIN rentals other ON other.asset_id = w.asset_id AND other.rental_number <> w.rental_number
+	  WHERE other.status IN ('pending','approved','active')
+	    AND rental_span(other) && tstzrange(w.lo, GREATEST(w.lo, w.hi), '[)')
+	)`
+
+// WouldConflict reports whether extending the rental to the requested return
+// date would overlap another open rental or reservation of the same assets.
+func (r *RentalExtensionRepo) WouldConflict(ctx context.Context, rentalNumber int, requested time.Time) (bool, error) {
+	return extensionConflicts(ctx, r.pool, rentalNumber, requested)
+}
+
+func extensionConflicts(ctx context.Context, q rowQuerier, rentalNumber int, requested time.Time) (bool, error) {
+	var conflict bool
+	err := q.QueryRow(ctx, extensionConflictSQL, rentalNumber, requested).Scan(&conflict)
+	return conflict, err
+}
 
 func NewRentalExtensionRepo(pool *pgxpool.Pool) *RentalExtensionRepo {
 	return &RentalExtensionRepo{pool: pool}
@@ -119,8 +163,28 @@ func (r *RentalExtensionRepo) Approve(ctx context.Context, id, decidedBy, note s
 	if cur.Status != "pending" {
 		return nil, ErrExtensionNotPending
 	}
+	// Serialise with anything else booking these assets, then re-check: another
+	// reservation may have been made since the request was filed.
+	if _, err := tx.Exec(ctx,
+		`SELECT 1 FROM assets WHERE id IN (SELECT asset_id FROM rentals WHERE rental_number=$1 AND asset_id IS NOT NULL) FOR UPDATE`,
+		cur.RentalNumber); err != nil {
+		return nil, err
+	}
+	conflict, err := extensionConflicts(ctx, tx, cur.RentalNumber, cur.RequestedExpectedReturn)
+	if err != nil {
+		return nil, err
+	}
+	if conflict {
+		return nil, ErrExtensionConflict
+	}
+	// A timed booking (end_at set) moves its end to the requested date at the
+	// same clock time, so its span really grows; date-based ones follow expected_return.
 	tag, err := tx.Exec(ctx,
-		`UPDATE rentals SET expected_return=$1, updated_at=now() WHERE rental_number=$2 AND status='active'`,
+		`UPDATE rentals SET expected_return=$1,
+		        end_at = CASE WHEN end_at IS NULL THEN NULL
+		                 ELSE (($1::date)::timestamp + (end_at AT TIME ZONE 'Asia/Taipei')::time) AT TIME ZONE 'Asia/Taipei' END,
+		        updated_at=now()
+		 WHERE rental_number=$2 AND status='active'`,
 		cur.RequestedExpectedReturn, cur.RentalNumber)
 	if err != nil {
 		return nil, err

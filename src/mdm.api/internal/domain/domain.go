@@ -268,8 +268,12 @@ type CategoryRentalRule struct {
 	// HalfDayEnabled lets rentals of this category be booked for just the
 	// morning or afternoon (Rental.Period), resolved with the same ancestor walk.
 	HalfDayEnabled bool
-	UpdatedBy      *string
-	UpdatedAt      time.Time
+	// ReservationEnabled lets assets of this category be booked for a later
+	// time while they are still out: a booking only has to avoid overlapping
+	// other rentals' time spans. Off: any open rental blocks the asset.
+	ReservationEnabled bool
+	UpdatedBy          *string
+	UpdatedAt          time.Time
 }
 
 // RentalDailyReport is one day's checklist for a daily_tracking_required

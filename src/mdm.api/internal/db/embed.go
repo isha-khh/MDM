@@ -106,3 +106,6 @@ var Migration034SQL string
 
 //go:embed migrations/041_half_day_rentals.up.sql
 var Migration041SQL string
+
+//go:embed migrations/042_rental_time_span.up.sql
+var Migration042SQL string

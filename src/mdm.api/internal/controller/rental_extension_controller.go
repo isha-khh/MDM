@@ -112,6 +112,16 @@ func (c *RentalController) handleExtend(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// Reject up front if the longer period would run into another booking of the
+	// same asset (checked again when it is approved).
+	if conflict, err := c.extensionRepo.WouldConflict(r.Context(), rental.RentalNumber, requested); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	} else if conflict {
+		writeError(w, http.StatusConflict, postgres.ErrExtensionConflict.Error())
+		return
+	}
+
 	reason := strings.TrimSpace(body.Reason)
 	id, err := c.extensionRepo.Create(r.Context(), &domain.RentalExtension{
 		RentalNumber:            rental.RentalNumber,
@@ -205,7 +215,7 @@ func (c *RentalController) handleExtensionDecision(w http.ResponseWriter, r *htt
 	}
 	if err != nil {
 		switch {
-		case errors.Is(err, postgres.ErrExtensionNotPending):
+		case errors.Is(err, postgres.ErrExtensionNotPending), errors.Is(err, postgres.ErrExtensionConflict):
 			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, domain.ErrExtensionNotActive):
 			writeError(w, http.StatusBadRequest, "此租借已不是借出中，無法續借")

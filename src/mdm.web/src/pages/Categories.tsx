@@ -58,18 +58,21 @@ export function Categories() {
   const [rentalRules, setRentalRules] = useState<Record<string, boolean>>({});
   // 允許半天出借（借用人可選上午／下午時段，同一天可由不同人分段借用）。
   const [halfDayRules, setHalfDayRules] = useState<Record<string, boolean>>({});
+  // 允許預約（資產借出中也能預約之後的時段，只要時間不與其他租借重疊）。
+  const [reservationRules, setReservationRules] = useState<Record<string, boolean>>({});
   const [savingRuleId, setSavingRuleId] = useState<string | null>(null);
 
   const loadRentalRules = async (cats: Category[]) => {
     const leafIds = cats.filter((c) => !cats.some((child) => child.parent_id === c.id)).map((c) => c.id);
-    const entries = await Promise.all(leafIds.map(async (id): Promise<[string, boolean, boolean]> => {
+    const entries = await Promise.all(leafIds.map(async (id): Promise<[string, boolean, boolean, boolean]> => {
       try {
         const { data } = await apiClient.get(`/api/categories/${id}/rental-rule`);
-        return [id, !!data.daily_tracking_required, !!data.half_day_enabled];
-      } catch { return [id, false, false]; }
+        return [id, !!data.daily_tracking_required, !!data.half_day_enabled, !!data.reservation_enabled];
+      } catch { return [id, false, false, false]; }
     }));
     setRentalRules(Object.fromEntries(entries.map(([id, d]) => [id, d])));
     setHalfDayRules(Object.fromEntries(entries.map(([id, , h]) => [id, h])));
+    setReservationRules(Object.fromEntries(entries.map(([id, , , r]) => [id, r])));
   };
 
   const load = async () => {
@@ -99,6 +102,15 @@ export function Categories() {
     try {
       await apiClient.put(`/api/categories/${id}/rental-rule`, { half_day_enabled: value });
       setHalfDayRules((prev) => ({ ...prev, [id]: value }));
+    } catch { await dialog.error("設定失敗"); }
+    finally { setSavingRuleId(null); }
+  };
+
+  const toggleReservation = async (id: string, value: boolean) => {
+    setSavingRuleId(id);
+    try {
+      await apiClient.put(`/api/categories/${id}/rental-rule`, { reservation_enabled: value });
+      setReservationRules((prev) => ({ ...prev, [id]: value }));
     } catch { await dialog.error("設定失敗"); }
     finally { setSavingRuleId(null); }
   };
@@ -334,6 +346,19 @@ export function Categories() {
                       onChange={(e) => toggleHalfDay(cat.id, e.target.checked)}
                     />
                     可半天出借
+                  </label>
+                  <label
+                    className="flex items-center gap-1 text-xs opacity-70 cursor-pointer whitespace-nowrap"
+                    title="開啟後：資產即使目前借出中（還沒歸還），也能預約之後的時段，只要不與其他租借的時間重疊；前一位歸還前無法交付。關閉時，資產有任何進行中的租借就不能再借"
+                  >
+                    <input
+                      type="checkbox"
+                      className="toggle toggle-xs"
+                      checked={!!reservationRules[cat.id]}
+                      disabled={savingRuleId === cat.id}
+                      onChange={(e) => toggleReservation(cat.id, e.target.checked)}
+                    />
+                    可預約
                   </label>
                 </>
               )}

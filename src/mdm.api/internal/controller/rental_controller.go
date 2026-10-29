@@ -231,6 +231,11 @@ func (c *RentalController) handlePickableAssets(w http.ResponseWriter, r *http.R
 		LastReturnAt       *string                `json:"last_return_at,omitempty"`
 		HalfDayEnabled     bool                   `json:"half_day_enabled"`
 		BookedSlots        []string               `json:"booked_slots"`
+		// ReservationEnabled: the category allows booking while the asset is
+		// out; BookedRanges ("start|end", Taipei time) is what a reservation
+		// has to avoid.
+		ReservationEnabled bool     `json:"reservation_enabled"`
+		BookedRanges       []string `json:"booked_ranges"`
 	}
 	cats, _ := c.categoryRepo.List(r.Context())
 	rows := make([]row, 0, len(items))
@@ -245,6 +250,11 @@ func (c *RentalController) handlePickableAssets(w http.ResponseWriter, r *http.R
 		}
 		if it.CategoryID != nil {
 			rr.HalfDayEnabled, _ = c.rentalRuleRepo.ResolveHalfDayEnabled(r.Context(), cats, *it.CategoryID)
+			rr.ReservationEnabled, _ = c.rentalRuleRepo.ResolveReservationEnabled(r.Context(), cats, *it.CategoryID)
+		}
+		rr.AssetStatus = domain.PickableStatus(it.AssetStatus, rr.ReservationEnabled, it.HeldNow, it.OpenWholeDay)
+		if rr.ReservationEnabled {
+			rr.BookedRanges = it.BookedRanges
 		}
 		if it.LastReturnAt != nil {
 			s := it.LastReturnAt.Format(time.RFC3339)
@@ -409,13 +419,38 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 			}
 		}
 
+		// Whether a category allows reservations decides how "already rented" is
+		// judged: with them, only an overlapping time span blocks the booking;
+		// without, any open rental of the asset does.
+		allCats, err := c.categoryRepo.List(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		bookingFor := func(categoryID *string) (domain.Booking, error) {
+			reservation := false
+			if categoryID != nil && *categoryID != "" {
+				var err error
+				if reservation, err = c.rentalRuleRepo.ResolveReservationEnabled(r.Context(), allCats, *categoryID); err != nil {
+					return domain.Booking{}, err
+				}
+			}
+			return domain.NewBooking(period, borrowDate, expectedReturn, reservation), nil
+		}
+
 		// Category mode: auto-pick available assets for each line.
 		if len(body.AssetIDs) == 0 && len(body.CategoryLines) > 0 {
 			for _, line := range body.CategoryLines {
 				if line.CategoryID == "" || line.Quantity <= 0 {
 					continue
 				}
-				ids, err := c.assetRepo.ListAvailableByCategory(r.Context(), line.CategoryID, period, borrowDate, line.Quantity)
+				lineCat := line.CategoryID
+				booking, err := bookingFor(&lineCat)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				ids, err := c.assetRepo.ListAvailableByCategory(r.Context(), line.CategoryID, booking, line.Quantity)
 				if err != nil {
 					writeError(w, http.StatusInternalServerError, err.Error())
 					return
@@ -470,13 +505,18 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 				unavailable = append(unavailable, aid+" (不存在)")
 				continue
 			}
-			status, isRented, name, _ := c.assetRepo.CheckAssetAvailability(r.Context(), aid, period, borrowDate)
+			booking, err := bookingFor(a.CategoryID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			status, isRented, name, _ := c.assetRepo.CheckAssetAvailability(r.Context(), aid, booking)
 			label := name
 			if label == "" {
 				label = a.AssetNumber
 			}
 			if isRented {
-				unavailable = append(unavailable, label+" (借出中)")
+				unavailable = append(unavailable, label+" (借出中或此時段已被預約)")
 				continue
 			}
 			if status != "available" && status != "" {
@@ -664,6 +704,15 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 			}
 			if rental.Status != "approved" {
 				writeError(w, http.StatusBadRequest, "rental is not approved")
+				return
+			}
+			// A reservation made while the asset was out can't be handed over
+			// until the previous borrower has returned it.
+			if held, isHeld, err := c.rentalRepo.HeldByAnother(r.Context(), rental.RentalNumber); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			} else if isHeld {
+				writeError(w, http.StatusConflict, "資產 "+held+" 上一筆租借尚未歸還，無法交付")
 				return
 			}
 			c.rentalRepo.ActivateByNumber(r.Context(), rental.RentalNumber)
