@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Mail, Inbox, Save, Send, PlugZap, KeyRound, ExternalLink } from "lucide-react";
 import apiClient from "../lib/apiClient";
 import { useDialog } from "../components/DialogProvider";
+import { IntegrationSettings } from "../components/IntegrationSettings";
 
 interface MailSettings {
   smtp_enabled: boolean;
@@ -465,6 +466,9 @@ export function Settings() {
           </div>
         </div>
       </div>
+
+      {/* 派發系統整合 API */}
+      <IntegrationSettings />
 
     </div>
   );
