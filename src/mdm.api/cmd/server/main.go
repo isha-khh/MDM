@@ -95,6 +95,24 @@ func main() {
 	rentalExtensionRepo := postgres.NewRentalExtensionRepo(pool)
 	integrationRepo := postgres.NewIntegrationRepo(pool)
 	reservationRepo := postgres.NewReservationRepo(pool)
+	webhookOutbox := postgres.NewWebhookOutbox(pool)
+
+	// Webhook to the dispatch system for reservation changes made in the web UI.
+	// Both URL and secret are needed; a half-configured one is reported, not guessed.
+	var reservationEvents *service.ReservationEvents
+	switch {
+	case cfg.DispatchWebhookURL != "" && cfg.DispatchWebhookSecret != "":
+		reservationEvents = service.NewReservationEvents(reservationRepo, webhookOutbox)
+		go service.NewWebhookDispatcher(webhookOutbox, cfg.DispatchWebhookURL, cfg.DispatchWebhookSecret).Run(context.Background())
+		log.Printf("[mdm-webhook] enabled, sending to %s", cfg.DispatchWebhookURL)
+		if len(cfg.DispatchWebhookSecret) < 16 {
+			log.Printf("[mdm-webhook] warning: DISPATCH_WEBHOOK_SECRET is shorter than 16 characters")
+		}
+	case cfg.DispatchWebhookURL != "" || cfg.DispatchWebhookSecret != "":
+		log.Printf("[mdm-webhook] disabled: both DISPATCH_WEBHOOK_URL and DISPATCH_WEBHOOK_SECRET must be set")
+	default:
+		log.Printf("[mdm-webhook] disabled (DISPATCH_WEBHOOK_URL not set)")
+	}
 
 	// Auth helper (module-level permission checks)
 	authHelper := middleware.NewAuthHelper(cfg.JWTSecret, permissionRepo)
@@ -286,7 +304,7 @@ func main() {
 		controller.NewDeviceController(deviceRepo, mdmClient, authHelper, depSchedulerRunner(depScheduler), depRepoForController, cfg.DEPTemplateDir),
 		controller.NewAssetController(assetRepo, auditRepo, custodyRepo, userRepo, categoryRepo, authHelper),
 		controller.NewInventoryController(inventoryRepo, auditRepo, authHelper),
-		controller.NewRentalController(rentalRepo, assetRepo, userRepo, notifySvc, authHelper, categoryRepo, categoryRentalRuleRepo, rentalDailyReportRepo, checklistTemplateRepo, rentalExtensionRepo),
+		controller.NewRentalController(rentalRepo, assetRepo, userRepo, notifySvc, authHelper, categoryRepo, categoryRentalRuleRepo, rentalDailyReportRepo, checklistTemplateRepo, rentalExtensionRepo).WithEvents(reservationEvents),
 		controller.NewMaintenanceController(maintenanceRepo, assetRepo, userRepo, auditRepo, authHelper),
 		controller.NewDisposalController(disposalRepo, assetRepo, userRepo, authHelper),
 		controller.NewAppController(appRepo, deviceRepo, mdmClient, vppClient, auditRepo, authHelper),
@@ -297,7 +315,8 @@ func main() {
 		controller.NewProfileController(profileRepo, authHelper),
 		controller.NewNotificationController(notificationRepo, authHelper),
 		controller.NewSettingsController(mailSettingsRepo, smtpSender, authHelper),
-		controller.NewIntegrationSettingsController(integrationRepo, auditRepo, authHelper, cfg.IntegrationListenAddr),
+		controller.NewIntegrationSettingsController(integrationRepo, auditRepo, authHelper, cfg.IntegrationListenAddr,
+			controller.WebhookStatus{Outbox: webhookOutbox, URL: cfg.DispatchWebhookURL, Enabled: reservationEvents != nil}),
 	)
 
 	// CORS
@@ -363,7 +382,7 @@ func main() {
 
 func runMigrations(pool *pgxpool.Pool) {
 	ctx := context.Background()
-	for i, sql := range []string{db.MigrationSQL, db.Migration002SQL, db.Migration003SQL, db.Migration004SQL, db.Migration005SQL, db.Migration006SQL, db.Migration007SQL, db.Migration008SQL, db.Migration009SQL, db.Migration010SQL, db.Migration011SQL, db.Migration012SQL, db.Migration013SQL, db.Migration014SQL, db.Migration015SQL, db.Migration016SQL, db.Migration017SQL, db.Migration018SQL, db.Migration019SQL, db.Migration020SQL, db.Migration021SQL, db.Migration022SQL, db.Migration023SQL, db.Migration024SQL, db.Migration025SQL, db.Migration026SQL, db.Migration027SQL, db.Migration028SQL, db.Migration029SQL, db.Migration030SQL, db.Migration031SQL, db.Migration032SQL, db.Migration033SQL, db.Migration034SQL, db.Migration041SQL, db.Migration042SQL, db.Migration043SQL} {
+	for i, sql := range []string{db.MigrationSQL, db.Migration002SQL, db.Migration003SQL, db.Migration004SQL, db.Migration005SQL, db.Migration006SQL, db.Migration007SQL, db.Migration008SQL, db.Migration009SQL, db.Migration010SQL, db.Migration011SQL, db.Migration012SQL, db.Migration013SQL, db.Migration014SQL, db.Migration015SQL, db.Migration016SQL, db.Migration017SQL, db.Migration018SQL, db.Migration019SQL, db.Migration020SQL, db.Migration021SQL, db.Migration022SQL, db.Migration023SQL, db.Migration024SQL, db.Migration025SQL, db.Migration026SQL, db.Migration027SQL, db.Migration028SQL, db.Migration029SQL, db.Migration030SQL, db.Migration031SQL, db.Migration032SQL, db.Migration033SQL, db.Migration034SQL, db.Migration041SQL, db.Migration042SQL, db.Migration043SQL, db.Migration044SQL} {
 		if _, err := pool.Exec(ctx, sql); err != nil {
 			log.Printf("migration %d: %v (may already be applied)", i+1, err)
 		} else {

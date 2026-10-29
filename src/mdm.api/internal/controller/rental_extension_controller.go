@@ -207,6 +207,7 @@ func (c *RentalController) handleExtensionDecision(w http.ResponseWriter, r *htt
 	json.NewDecoder(r.Body).Decode(&body)
 	note := strings.TrimSpace(body.Note)
 
+	before := c.events.Snapshot(r.Context(), ext.RentalNumber)
 	var decided *domain.RentalExtension
 	if action == "approve" {
 		decided, err = c.extensionRepo.Approve(r.Context(), id, claims.UserID, note)
@@ -224,6 +225,8 @@ func (c *RentalController) handleExtensionDecision(w http.ResponseWriter, r *htt
 		}
 		return
 	}
+
+	c.events.Changed(r.Context(), ext.RentalNumber, before, claims.Username, note)
 
 	approverName := claims.Username
 	if u, err := c.userRepo.GetByID(r.Context(), claims.UserID); err == nil && u.DisplayName != "" {

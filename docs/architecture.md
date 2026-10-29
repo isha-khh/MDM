@@ -76,6 +76,7 @@ docker-compose up -d
 |----------|---------|-------------|
 | LISTEN_ADDR | :8080 | Server listen address |
 | INTEGRATION_LISTEN_ADDR | (empty = off) | Listen address of the dispatch-system reservation API (see docs/dispatch-integration.md) |
+| DISPATCH_WEBHOOK_URL / DISPATCH_WEBHOOK_SECRET | (empty = off) | Where MDM reports reservation changes made in the web UI, and the shared secret signing them (see docs/dispatch-integration.md §6) |
 | INTEGRATION_TRUSTED_PROXIES | loopback + private ranges | CIDRs whose `CF-Connecting-IP` header is trusted for the integration API |
 | DATABASE_URL | postgres://mdm:mdm@localhost:5432/mdm?sslmode=disable | PostgreSQL DSN |
 | JWT_SECRET | change-me-in-production | JWT signing secret |

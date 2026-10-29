@@ -112,3 +112,6 @@ var Migration042SQL string
 
 //go:embed migrations/043_dispatch_integration.up.sql
 var Migration043SQL string
+
+//go:embed migrations/044_mdm_webhook_outbox.up.sql
+var Migration044SQL string
