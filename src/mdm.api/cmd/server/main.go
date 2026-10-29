@@ -20,8 +20,6 @@ import (
 
 	"github.com/anthropics/mdm-server/gen/mdm/v1/mdmv1connect"
 	"github.com/anthropics/mdm-server/internal/adapter/abm"
-	directoryAdapter "github.com/anthropics/mdm-server/internal/adapter/directory"
-	googleAdapter "github.com/anthropics/mdm-server/internal/adapter/google"
 	"github.com/anthropics/mdm-server/internal/adapter/micromdm"
 	"github.com/anthropics/mdm-server/internal/adapter/postgres"
 	smtpAdapter "github.com/anthropics/mdm-server/internal/adapter/smtp"
@@ -95,9 +93,6 @@ func main() {
 	categoryNoticeRepo := postgres.NewCategoryNoticeRepo(pool)
 	categoryNoticeImageRepo := postgres.NewCategoryNoticeImageRepo(pool)
 	rentalExtensionRepo := postgres.NewRentalExtensionRepo(pool)
-	googleCalendarSettingsRepo := postgres.NewGoogleCalendarSettingsRepo(pool)
-	directorySettingsRepo := postgres.NewDirectorySettingsRepo(pool)
-	tripCarNoticeRepo := postgres.NewTripCarNoticeRepo(pool)
 
 	// Auth helper (module-level permission checks)
 	authHelper := middleware.NewAuthHelper(cfg.JWTSecret, permissionRepo)
@@ -277,15 +272,6 @@ func main() {
 	// Swagger UI
 	mux.Handle("/swagger/", httpSwagger.WrapHandler)
 
-	// The directory controller also serves the Google Calendar trip preview.
-	directoryController := controller.NewDirectoryController(directorySettingsRepo, cfg.SettingsEncryptionKey, authHelper, directoryAdapter.NewClient())
-	tripNoticeScheduleRepo := postgres.NewTripNoticeScheduleRepo(pool)
-	googleCalendarController := controller.NewGoogleCalendarController(googleCalendarSettingsRepo, cfg.SettingsEncryptionKey, authHelper, googleAdapter.NewClient(), directoryController).
-		WithNotices(tripCarNoticeRepo, smtpSender).
-		WithSchedule(tripNoticeScheduleRepo)
-	// Daily automatic sending of trip rental-car notices (off until an admin enables it).
-	controller.NewTripNoticeScheduler(tripNoticeScheduleRepo, googleCalendarController).Start(context.Background())
-
 	// Register REST controllers
 	controller.RegisterAll(mux,
 		controller.NewSystemController(pool, cfg),
@@ -304,8 +290,6 @@ func main() {
 		controller.NewAppController(appRepo, deviceRepo, mdmClient, vppClient, auditRepo, authHelper),
 		controller.NewUserController(userRepo, permissionRepo, authHelper),
 		controller.NewCategoryController(categoryRepo, authHelper, categoryRentalRuleRepo, checklistTemplateRepo, categoryNoticeRepo),
-		directoryController,
-		googleCalendarController,
 		controller.NewChecklistController(categoryRepo, checklistTemplateRepo, checklistPhotoRepo, authHelper),
 		controller.NewCategoryNoticeController(categoryRepo, categoryNoticeRepo, categoryNoticeImageRepo, authHelper),
 		controller.NewProfileController(profileRepo, authHelper),
@@ -347,7 +331,7 @@ func main() {
 
 func runMigrations(pool *pgxpool.Pool) {
 	ctx := context.Background()
-	for i, sql := range []string{db.MigrationSQL, db.Migration002SQL, db.Migration003SQL, db.Migration004SQL, db.Migration005SQL, db.Migration006SQL, db.Migration007SQL, db.Migration008SQL, db.Migration009SQL, db.Migration010SQL, db.Migration011SQL, db.Migration012SQL, db.Migration013SQL, db.Migration014SQL, db.Migration015SQL, db.Migration016SQL, db.Migration017SQL, db.Migration018SQL, db.Migration019SQL, db.Migration020SQL, db.Migration021SQL, db.Migration022SQL, db.Migration023SQL, db.Migration024SQL, db.Migration025SQL, db.Migration026SQL, db.Migration027SQL, db.Migration028SQL, db.Migration029SQL, db.Migration030SQL, db.Migration031SQL, db.Migration032SQL, db.Migration033SQL, db.Migration034SQL, db.Migration035SQL, db.Migration036SQL, db.Migration037SQL, db.Migration038SQL, db.Migration039SQL, db.Migration040SQL, db.Migration041SQL} {
+	for i, sql := range []string{db.MigrationSQL, db.Migration002SQL, db.Migration003SQL, db.Migration004SQL, db.Migration005SQL, db.Migration006SQL, db.Migration007SQL, db.Migration008SQL, db.Migration009SQL, db.Migration010SQL, db.Migration011SQL, db.Migration012SQL, db.Migration013SQL, db.Migration014SQL, db.Migration015SQL, db.Migration016SQL, db.Migration017SQL, db.Migration018SQL, db.Migration019SQL, db.Migration020SQL, db.Migration021SQL, db.Migration022SQL, db.Migration023SQL, db.Migration024SQL, db.Migration025SQL, db.Migration026SQL, db.Migration027SQL, db.Migration028SQL, db.Migration029SQL, db.Migration030SQL, db.Migration031SQL, db.Migration032SQL, db.Migration033SQL, db.Migration034SQL, db.Migration041SQL} {
 		if _, err := pool.Exec(ctx, sql); err != nil {
 			log.Printf("migration %d: %v (may already be applied)", i+1, err)
 		} else {
