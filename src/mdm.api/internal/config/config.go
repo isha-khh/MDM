@@ -13,10 +13,6 @@ type Config struct {
 	ListenAddr  string
 	DatabaseURL string
 	JWTSecret   string
-	// SettingsEncryptionKey encrypts secrets stored in the database (Google
-	// OAuth client secret and refresh token). Optional: without it those
-	// features stay disabled rather than storing secrets in plaintext.
-	SettingsEncryptionKey string
 	// CookieSecure sets the Secure flag on the auth cookie. Defaults to true
 	// (fail-safe) — local HTTP development must explicitly opt out via
 	// COOKIE_SECURE=false, since browsers refuse to send a Secure cookie over
@@ -85,16 +81,15 @@ func Load() *Config {
 	}
 
 	return &Config{
-		ListenAddr:            envOr("LISTEN_ADDR", ":8080"),
-		DatabaseURL:           envOr("DATABASE_URL", "postgres://mdm:mdm@localhost:5432/mdm?sslmode=disable"),
-		JWTSecret:             envOr("JWT_SECRET", "change-me-in-production"),
-		SettingsEncryptionKey: envOr("SETTINGS_ENCRYPTION_KEY", ""),
-		CookieSecure:          envOr("COOKIE_SECURE", "true") == "true",
-		MicroMDMURL:           envOr("MICROMDM_URL", ""),
-		MicroMDMKey:           envOr("MICROMDM_API_KEY", ""),
-		VPPTokenPath:          envOr("VPP_TOKEN_PATH", ""),
-		WebhookPath:           envOr("WEBHOOK_PATH", "/webhook"),
-		WebSocketURL:          envOr("WEBSOCKET_URL", ""),
+		ListenAddr:   envOr("LISTEN_ADDR", ":8080"),
+		DatabaseURL:  envOr("DATABASE_URL", "postgres://mdm:mdm@localhost:5432/mdm?sslmode=disable"),
+		JWTSecret:    envOr("JWT_SECRET", "change-me-in-production"),
+		CookieSecure: envOr("COOKIE_SECURE", "true") == "true",
+		MicroMDMURL:  envOr("MICROMDM_URL", ""),
+		MicroMDMKey:  envOr("MICROMDM_API_KEY", ""),
+		VPPTokenPath: envOr("VPP_TOKEN_PATH", ""),
+		WebhookPath:  envOr("WEBHOOK_PATH", "/webhook"),
+		WebSocketURL: envOr("WEBSOCKET_URL", ""),
 		SMTP: SMTPConfig{
 			Host:               envOr("SMTP_HOST", ""),
 			Port:               envOr("SMTP_PORT", "587"),
