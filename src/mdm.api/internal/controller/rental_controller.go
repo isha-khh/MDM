@@ -30,6 +30,14 @@ type RentalController struct {
 	dailyReportRepo *postgres.RentalDailyReportRepo
 	templateRepo    *postgres.ChecklistTemplateRepo
 	extensionRepo   *postgres.RentalExtensionRepo
+	events          *service.ReservationEvents // nil: no webhook
+}
+
+// WithEvents makes changes to reservations of integration resources queue
+// webhook events for the dispatch system. Without it (or with nil) none are sent.
+func (c *RentalController) WithEvents(e *service.ReservationEvents) *RentalController {
+	c.events = e
+	return c
 }
 
 func NewRentalController(rentalRepo *postgres.RentalRepo, assetRepo *postgres.AssetRepo, userRepo port.UserRepository, notifySvc *service.NotifyService, auth *middleware.AuthHelper, categoryRepo port.CategoryRepository, rentalRuleRepo *postgres.CategoryRentalRuleRepo, dailyReportRepo *postgres.RentalDailyReportRepo, templateRepo *postgres.ChecklistTemplateRepo, extensionRepo *postgres.RentalExtensionRepo) *RentalController {
@@ -604,6 +612,7 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 			}
 			ids = append(ids, id)
 		}
+		c.events.Changed(r.Context(), rentalNumber, nil, claims.Username, "")
 		// Notify custodians/approvers about the new rental request
 		go func() {
 			bgCtx := context.Background()
@@ -656,6 +665,16 @@ func (c *RentalController) handleRentalByID(w http.ResponseWriter, r *http.Reque
 	action := ""
 	if len(parts) > 1 {
 		action = parts[1]
+	}
+
+	// Whatever the action does to a reservation of an integration resource
+	// (approve, hand over, return, reject, delete ...) is reported to the
+	// dispatch system once it is done; actions that change nothing queue nothing.
+	if c.events != nil && ((r.Method == http.MethodPost && action != "") || r.Method == http.MethodDelete) {
+		if rl, err := c.rentalRepo.GetByID(r.Context(), id); err == nil {
+			before := c.events.Snapshot(r.Context(), rl.RentalNumber)
+			defer c.events.Changed(r.Context(), rl.RentalNumber, before, claims.Username, "")
+		}
 	}
 
 	if r.Method == http.MethodPost && action != "" {

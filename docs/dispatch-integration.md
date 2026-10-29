@@ -133,7 +133,43 @@ MDM 的 `username` 不一定等於 AD 帳號：只有經 SSO 建立／綁定的�
    - 否則回 `BORROWER_NOT_FOUND`。**不用名字猜。**
 4. 回應的 `borrowerEmployeeId`：優先是派發系統送來的值；否則 SSO 帳號用 `username`；其餘為 `null`。要認人請以 `borrowerEmail` 為準。
 
-## 6. 第二階段（未實作）
+## 6. MDM → 派發系統 webhook（§7.6）
 
-- §7.6 MDM → 派發系統 webhook（簽章 `X-Timestamp`／`X-Signature`）：行政人員在網頁上建立、修改、取消預約時通知派發系統；API 自己造成的異動不回報。需要雙方約定 `secret` 與 `reservation.status` 值。
-- §7.7 每日對帳：由派發系統端用 `GET /reservations?from=…&to=…` 比對。
+行政人員在 MDM 網頁上動了預約，MDM 就通知派發系統。**透過這份 API 做的異動不會回報**（派發系統自己知道）。
+
+### 設定
+
+兩個環境變數都設了才會啟用（只設一個會在啟動紀錄警告）：
+
+| 變數 | 說明 |
+|---|---|
+| `DISPATCH_WEBHOOK_URL` | 派發系統的接收端點，如 `https://dispatch.example.com/integrations/mdm/events` |
+| `DISPATCH_WEBHOOK_SECRET` | 與派發系統約定的簽章金鑰（建議 32 字元以上的隨機值；不要含 ` #`）。**只放環境變數，不進程式碼、不進資料庫** |
+
+設定畫面（整合 API 卡片）會顯示 webhook 是否啟用、等待中與已放棄的事件數、最近一次錯誤，並可把已放棄的事件重新排入佇列。
+
+### 什麼時候送
+
+只針對對應到整合資源（如 `RENTAL_CAR_01`）的租借，並且是動作做完以後「這筆預約的內容有變」才送：
+
+| 網頁上的動作 | 事件 |
+|---|---|
+| 新增租借（含舊的整天租借） | `reservation.created` |
+| 時間、借用人、乘客、車輛改變（含續借核准） | `reservation.changed` |
+| 拒絕、刪除 | `reservation.cancelled`（刪除的以 `status: CANCELLED` 回報） |
+| 交付（出車）、歸還 | `reservation.status_changed` |
+| 核准、逐日回報、存查 | 不送（預約內容沒變） |
+
+事件內容照規格 §7.6：`eventId`（`mdm-evt-yyyymmdd-nnnnnn`）、`eventType`、`occurredAt`、`reservationId`、`externalRef`（MDM 自己建立的為 `null`）、`changedBy`（操作者的 MDM 帳號）、`note`（續借核准時為審核備註）、`reservation`、`previous`（`created` 為 `null`）。`reservation` 另外帶 `borrowerEmail`、`borrowerName`。網頁上舊式的整天租借時間為當日 00:00 到隔天 00:00。
+
+### 簽章與重送
+
+- `X-Timestamp`：送出當下的 Unix 秒數；`X-Signature`：`sha256=` + `HMAC-SHA256(secret, "{X-Timestamp}.{原始 body}")` 的小寫 hex。重送時時間戳與簽章重新計算，**body 與 `eventId` 不變**。
+- 回 200 視為成功；回 400 不重試（事件本身有問題，標為失敗）；其他（含 401、逾時、5xx）依 1、2、4、8、16 分鐘重試，共 5 次，之後標為失敗。401 也重試是因為 secret 或主機時間修好後可以自然恢復。
+- 同一筆預約的事件依發生順序送：前一個還沒送成功，後一個等著，不會超前。不同預約之間彼此獨立。
+- 事件先寫進資料庫佇列（`integration_webhook_outbox`）再由背景工作送，所以 MDM 重啟或派發系統暫時不通都不會掉事件；已送成功的保留 30 天。
+
+## 7. 尚未實作
+
+- §7.7 每日對帳：由派發系統端用 `GET /reservations?from=…&to=…` 比對，MDM 不需再做。
+- 一張網頁租借單同時租兩輛不同的整合資源車輛時，只回報第一輛（預約編號 `R-{rental_number}` 對兩輛是同一個）；目前只有一輛車，不影響。

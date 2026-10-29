@@ -23,7 +23,7 @@ func TestIntegrationSettings(t *testing.T) {
 	auth := middleware.NewAuthHelper(secret, nil)
 
 	mux := http.NewServeMux()
-	NewIntegrationSettingsController(repo, postgres.NewAuditRepo(pool), auth, ":8081").RegisterRoutes(mux)
+	NewIntegrationSettingsController(repo, postgres.NewAuditRepo(pool), auth, ":8081", WebhookStatus{}).RegisterRoutes(mux)
 	web := httptest.NewServer(mux)
 	defer web.Close()
 
@@ -64,6 +64,17 @@ func TestIntegrationSettings(t *testing.T) {
 		}
 		resp.Body.Close()
 		return resp.StatusCode
+	}
+
+	// The webhook is configured by environment; the screen only reports on it.
+	if st, body := do(admin, "GET", "/api/settings/integration", nil); st != 200 || body["webhook"].(map[string]interface{})["enabled"] != false {
+		t.Errorf("webhook should read as off: %d %v", st, body["webhook"])
+	}
+	if st, _ := do(admin, "POST", "/api/settings/integration/webhook/retry", nil); st != 409 {
+		t.Errorf("retry with the webhook off: %d", st)
+	}
+	if st, _ := do(plain, "POST", "/api/settings/integration/webhook/retry", nil); st != 403 {
+		t.Errorf("retry as a plain user: %d", st)
 	}
 
 	// Only a system administrator may touch any of it.

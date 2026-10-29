@@ -50,6 +50,12 @@ type Config struct {
 	// IntegrationTrustedProxies are the CIDRs of the hops in front of the
 	// listener (the tunnel daemon) whose CF-Connecting-IP header is believed.
 	IntegrationTrustedProxies []string
+
+	// Webhook to the dispatch system for reservation changes made in the MDM web
+	// UI (spec §7.6). Both must be set to switch it on. The secret signs each
+	// request (HMAC-SHA256) and is agreed with the dispatch system out of band.
+	DispatchWebhookURL    string
+	DispatchWebhookSecret string
 }
 
 type SMTPConfig struct {
@@ -128,6 +134,9 @@ func Load() *Config {
 		IntegrationListenAddr: envOr("INTEGRATION_LISTEN_ADDR", ""),
 		IntegrationTrustedProxies: strings.Split(
 			envOr("INTEGRATION_TRUSTED_PROXIES", "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"), ","),
+
+		DispatchWebhookURL:    envOr("DISPATCH_WEBHOOK_URL", ""),
+		DispatchWebhookSecret: envOr("DISPATCH_WEBHOOK_SECRET", ""),
 	}
 }
 

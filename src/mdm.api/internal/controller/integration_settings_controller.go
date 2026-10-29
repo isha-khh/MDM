@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,16 +23,26 @@ type IntegrationSettingsController struct {
 	auditRepo  port.AuditRepository
 	auth       *middleware.AuthHelper
 	listenAddr string // integration listener address; empty = the API is switched off
+	webhook    WebhookStatus
 }
 
-func NewIntegrationSettingsController(repo *postgres.IntegrationRepo, auditRepo port.AuditRepository, auth *middleware.AuthHelper, listenAddr string) *IntegrationSettingsController {
-	return &IntegrationSettingsController{repo: repo, auditRepo: auditRepo, auth: auth, listenAddr: listenAddr}
+// WebhookStatus is what the settings screen shows about the webhook to the
+// dispatch system, which is configured by environment (URL and secret).
+type WebhookStatus struct {
+	Outbox  *postgres.WebhookOutbox
+	URL     string
+	Enabled bool
+}
+
+func NewIntegrationSettingsController(repo *postgres.IntegrationRepo, auditRepo port.AuditRepository, auth *middleware.AuthHelper, listenAddr string, webhook WebhookStatus) *IntegrationSettingsController {
+	return &IntegrationSettingsController{repo: repo, auditRepo: auditRepo, auth: auth, listenAddr: listenAddr, webhook: webhook}
 }
 
 func (c *IntegrationSettingsController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/settings/integration", c.handleGet)
 	mux.HandleFunc("PUT /api/settings/integration", c.handleUpdate)
 	mux.HandleFunc("POST /api/settings/integration/key", c.handleKey)
+	mux.HandleFunc("POST /api/settings/integration/webhook/retry", c.handleWebhookRetry)
 	mux.HandleFunc("PUT /api/settings/integration/resources/{id}", c.handlePutResource)
 	mux.HandleFunc("DELETE /api/settings/integration/resources/{id}", c.handleDeleteResource)
 }
@@ -99,7 +110,14 @@ func (c *IntegrationSettingsController) state(r *http.Request) (map[string]inter
 			AssetNumber: x.AssetNumber, AssetName: x.AssetName, AllowedCities: nonNil(x.AllowedCities), Enabled: x.Enabled,
 		})
 	}
+	hook := map[string]interface{}{"enabled": c.webhook.Enabled, "url": c.webhook.URL, "pending": 0, "failed": 0, "last_error": "", "last_sent_at": nil}
+	if c.webhook.Enabled {
+		if st, err := c.webhook.Outbox.Stats(r.Context()); err == nil {
+			hook["pending"], hook["failed"], hook["last_error"], hook["last_sent_at"] = st.Pending, st.Failed, st.LastError, timeStr(st.LastSentAt)
+		}
+	}
 	return map[string]interface{}{
+		"webhook":          hook,
 		"listener_enabled": c.listenAddr != "",
 		"listen_addr":      c.listenAddr,
 		"client":           toClientDTO(client),
@@ -224,6 +242,34 @@ func (c *IntegrationSettingsController) handleUpdate(w http.ResponseWriter, r *h
 		"enabled": updated.Enabled, "ip_allowlist": updated.IPAllowlist, "auto_create_email_domains": updated.AutoCreateEmailDomains,
 	})
 	c.audit(r, claims, "integration_settings_update", updated.Name, string(detail))
+	st, err := c.state(r)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, st)
+}
+
+// @Summary 把送給派發系統失敗（已放棄）的事件重新排入佇列（sys_admin）
+// @Tags Settings
+// @Security BearerAuth
+// @Router /api/settings/integration/webhook/retry [post]
+func (c *IntegrationSettingsController) handleWebhookRetry(w http.ResponseWriter, r *http.Request) {
+	claims, err := c.auth.RequireSysAdmin(r)
+	if err != nil {
+		writeError(w, http.StatusForbidden, "sys_admin required")
+		return
+	}
+	if !c.webhook.Enabled {
+		writeError(w, http.StatusConflict, "webhook 未啟用")
+		return
+	}
+	n, err := c.webhook.Outbox.RetryFailed(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.audit(r, claims, "integration_webhook_retry", "webhook", "requeued="+strconv.FormatInt(n, 10))
 	st, err := c.state(r)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

@@ -24,7 +24,17 @@ interface IntegrationResource {
   enabled: boolean;
 }
 
+interface WebhookState {
+  enabled: boolean;
+  url: string;
+  pending: number;
+  failed: number;
+  last_error: string;
+  last_sent_at: string | null;
+}
+
 interface IntegrationState {
+  webhook: WebhookState;
   listener_enabled: boolean;
   listen_addr: string;
   client: IntegrationClient | null;
@@ -130,6 +140,11 @@ export function IntegrationSettings() {
     const { data } = await apiClient.put<IntegrationState>("/api/settings/integration", { enabled });
     adopt(data);
   }, "更新失敗");
+
+  const retryWebhook = () => run(async () => {
+    const { data } = await apiClient.post<IntegrationState>("/api/settings/integration/webhook/retry");
+    adopt(data);
+  }, "重送失敗");
 
   const saveResource = () => run(async () => {
     if (!resId.trim() || !resAsset) {
@@ -254,6 +269,35 @@ export function IntegrationSettings() {
               </button>
             </div>
           </>
+        )}
+
+        {/* 通知派發系統 */}
+        <div className="divider my-1 text-sm">通知派發系統（webhook）</div>
+        {state.webhook.enabled ? (
+          <div className="text-sm space-y-1">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
+              <span className="badge badge-success badge-sm">已啟用</span>
+              <span className="font-mono text-xs break-all">{state.webhook.url}</span>
+              <span className="text-base-content/60">最近成功送出 {fmt(state.webhook.last_sent_at)}</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
+              <span>等待送出 <b>{state.webhook.pending}</b></span>
+              <span className={state.webhook.failed ? "text-error" : ""}>已放棄 <b>{state.webhook.failed}</b></span>
+              {state.webhook.failed > 0 && (
+                <button onClick={retryWebhook} disabled={busy} className="btn btn-outline btn-xs gap-1">
+                  <RefreshCw size={12} />重送已放棄的事件
+                </button>
+              )}
+            </div>
+            {state.webhook.last_error && (
+              <div className="text-xs text-error break-all">最近錯誤：{state.webhook.last_error}</div>
+            )}
+          </div>
+        ) : (
+          <p className="text-sm text-base-content/60">
+            未啟用。在 MDM 網頁上新增、修改、取消預約時要通知派發系統，需在伺服器設定
+            <code> DISPATCH_WEBHOOK_URL </code>與<code> DISPATCH_WEBHOOK_SECRET </code>（secret 與派發系統約定）並重啟。
+          </p>
         )}
 
         {/* 資源對應 */}
