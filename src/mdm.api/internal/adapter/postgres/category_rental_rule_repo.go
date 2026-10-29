@@ -23,9 +23,9 @@ func NewCategoryRentalRuleRepo(pool *pgxpool.Pool) *CategoryRentalRuleRepo {
 func (r *CategoryRentalRuleRepo) Get(ctx context.Context, categoryID string) (*domain.CategoryRentalRule, error) {
 	rule := &domain.CategoryRentalRule{}
 	err := r.pool.QueryRow(ctx,
-		`SELECT category_id, daily_tracking_required, half_day_enabled, updated_by, updated_at FROM category_rental_rules WHERE category_id=$1`,
+		`SELECT category_id, daily_tracking_required, half_day_enabled, reservation_enabled, updated_by, updated_at FROM category_rental_rules WHERE category_id=$1`,
 		categoryID,
-	).Scan(&rule.CategoryID, &rule.DailyTrackingRequired, &rule.HalfDayEnabled, &rule.UpdatedBy, &rule.UpdatedAt)
+	).Scan(&rule.CategoryID, &rule.DailyTrackingRequired, &rule.HalfDayEnabled, &rule.ReservationEnabled, &rule.UpdatedBy, &rule.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -34,15 +34,16 @@ func (r *CategoryRentalRuleRepo) Get(ctx context.Context, categoryID string) (*d
 
 // Upsert updates only the fields that are non-nil, leaving the other one as
 // it was (or at its default when the row is new).
-func (r *CategoryRentalRuleRepo) Upsert(ctx context.Context, categoryID string, dailyTrackingRequired, halfDayEnabled *bool, updatedBy string) error {
+func (r *CategoryRentalRuleRepo) Upsert(ctx context.Context, categoryID string, dailyTrackingRequired, halfDayEnabled, reservationEnabled *bool, updatedBy string) error {
 	_, err := r.pool.Exec(ctx, `
-		INSERT INTO category_rental_rules (category_id, daily_tracking_required, half_day_enabled, updated_by, updated_at)
-		VALUES ($1, COALESCE($2, FALSE), COALESCE($3, FALSE), $4, now())
+		INSERT INTO category_rental_rules (category_id, daily_tracking_required, half_day_enabled, reservation_enabled, updated_by, updated_at)
+		VALUES ($1, COALESCE($2, FALSE), COALESCE($3, FALSE), COALESCE($4, FALSE), $5, now())
 		ON CONFLICT (category_id) DO UPDATE SET
 		  daily_tracking_required = COALESCE($2, category_rental_rules.daily_tracking_required),
 		  half_day_enabled = COALESCE($3, category_rental_rules.half_day_enabled),
-		  updated_by = $4, updated_at = now()`,
-		categoryID, dailyTrackingRequired, halfDayEnabled, updatedBy)
+		  reservation_enabled = COALESCE($4, category_rental_rules.reservation_enabled),
+		  updated_by = $5, updated_at = now()`,
+		categoryID, dailyTrackingRequired, halfDayEnabled, reservationEnabled, updatedBy)
 	return err
 }
 
@@ -57,6 +58,12 @@ func (r *CategoryRentalRuleRepo) ResolveDailyTrackingRequired(ctx context.Contex
 // ResolveDailyTrackingRequired, using the same inheritance walk.
 func (r *CategoryRentalRuleRepo) ResolveHalfDayEnabled(ctx context.Context, categories []*domain.Category, categoryID string) (bool, error) {
 	return r.resolve(ctx, categories, categoryID, func(rule *domain.CategoryRentalRule) bool { return rule.HalfDayEnabled })
+}
+
+// ResolveReservationEnabled is the reservation counterpart, with the same
+// inheritance walk.
+func (r *CategoryRentalRuleRepo) ResolveReservationEnabled(ctx context.Context, categories []*domain.Category, categoryID string) (bool, error) {
+	return r.resolve(ctx, categories, categoryID, func(rule *domain.CategoryRentalRule) bool { return rule.ReservationEnabled })
 }
 
 // resolve walks up categoryID's ancestor chain — using the caller-supplied

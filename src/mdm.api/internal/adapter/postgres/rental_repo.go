@@ -3,10 +3,12 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/anthropics/mdm-server/internal/domain"
@@ -160,6 +162,29 @@ func (r *RentalRepo) UpdateStatusByNumber(ctx context.Context, rentalNumber int,
 		`UPDATE rentals SET status=$1, approver_id=$2, approver_name=$3, updated_at=now() WHERE rental_number=$4 AND status=$5`,
 		toStatus, approverID, approverName, rentalNumber, fromStatus)
 	return err
+}
+
+// HeldByAnother returns the asset number of the first asset in the rental batch
+// that another rental still holds — checked out (active) or returned by the
+// borrower but not yet verified (pending_return). With reservations an asset
+// can be booked while it is out, so handing it over must wait until it is back.
+func (r *RentalRepo) HeldByAnother(ctx context.Context, rentalNumber int) (string, bool, error) {
+	var number string
+	err := r.pool.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(a.asset_number,''), a.name, '')
+		FROM rentals me
+		JOIN rentals other ON other.asset_id = me.asset_id AND other.rental_number <> me.rental_number
+		                  AND other.status IN ('active','pending_return')
+		JOIN assets a ON a.id = me.asset_id
+		WHERE me.rental_number = $1
+		LIMIT 1`, rentalNumber).Scan(&number)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return number, true, nil
 }
 
 func (r *RentalRepo) ActivateByNumber(ctx context.Context, rentalNumber int) error {

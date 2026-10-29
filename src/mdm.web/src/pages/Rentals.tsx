@@ -204,13 +204,15 @@ export function Rentals() {
 
   // 所選資產的分類是否全部開放半天出借（決定是否顯示時段選項）
   const [halfDayHit, setHalfDayHit] = useState(false);
+  // 所選資產的分類是否全部開放預約（顯示預約提示）
+  const [reservationHit, setReservationHit] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const categoryIds = await resolveCreateCategoryIds();
       if (categoryIds.length === 0) {
-        if (!cancelled) { setDailyTrackingHit(false); setHalfDayHit(false); setPeriod("full"); }
+        if (!cancelled) { setDailyTrackingHit(false); setHalfDayHit(false); setReservationHit(false); setPeriod("full"); }
         return;
       }
       try {
@@ -220,9 +222,10 @@ export function Rentals() {
         if (cancelled) return;
         setDailyTrackingHit(isMultiDay && !!data.daily_tracking_required);
         setHalfDayHit(!!data.half_day_enabled);
+        setReservationHit(!!data.reservation_enabled);
         if (!data.half_day_enabled) setPeriod("full");
       } catch {
-        if (!cancelled) { setDailyTrackingHit(false); setHalfDayHit(false); setPeriod("full"); }
+        if (!cancelled) { setDailyTrackingHit(false); setHalfDayHit(false); setReservationHit(false); setPeriod("full"); }
       }
     })();
     return () => { cancelled = true; };
@@ -866,6 +869,11 @@ export function Rentals() {
                   <label className="label"><span className="label-text font-medium">借出日期</span></label>
                   <input type="date" value={borrowDate} onChange={(e) => setBorrowDate(e.target.value)} className="input input-bordered input-sm" />
                 </div>
+                {reservationHit && (
+                  <div className="sm:col-span-2 text-xs text-info">
+                    此分類可預約：資產目前借出中也能預約之後的日期，只要不與清單上「已排定」的時段重疊；前一位歸還前無法交付。
+                  </div>
+                )}
                 {halfDayHit && (
                   <div className="form-control">
                     <label className="label">

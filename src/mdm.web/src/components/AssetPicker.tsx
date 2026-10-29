@@ -26,7 +26,21 @@ interface AssetItem {
   // 該分類允許半天出借；booked_slots = 已被預約的半天時段（"YYYY-MM-DD am|pm"）
   half_day_enabled?: boolean;
   booked_slots?: string[];
+  // 該分類開放預約：借出中也能預約之後的時段；booked_ranges = 已排定的時段
+  // （"起|訖"，台灣時間 "YYYY-MM-DDTHH:mm"，訖為空表示沒有結束時間）
+  reservation_enabled?: boolean;
+  booked_ranges?: string[];
 }
+
+// "2026-10-30T09:00|2026-10-30T12:00" -> "10/30 09:00–10/30 12:00"
+function formatRange(r: string): string {
+  const [from, to] = r.split("|");
+  const f = (v: string) => `${v.slice(5, 7)}/${v.slice(8, 10)} ${v.slice(11, 16)}`;
+  return to ? `${f(from)}–${f(to)}` : `${f(from)} 起`;
+}
+
+// 借出中但可預約的資產：仍可挑選（借出日要排在其他租借之後）
+const isReservable = (a: AssetItem) => !!a.reservation_enabled && a.asset_status === "rented";
 
 interface AssetPickerProps {
   selected: string[];                   // asset_ids
@@ -88,7 +102,9 @@ export function AssetPicker({ selected, onChange, showFilters, endpoint = "/api/
           a.spec.toLowerCase().includes(q)
       );
     }
-    if (statusFilter) result = result.filter((a) => a.asset_status === statusFilter);
+    if (statusFilter) {
+      result = result.filter((a) => a.asset_status === statusFilter || (statusFilter === "available" && isReservable(a)));
+    }
     if (categoryFilter) result = result.filter((a) => a.category_id === categoryFilter);
     if (sourceFilter === "mdm") result = result.filter((a) => a.device_udid);
     else if (sourceFilter === "standalone") result = result.filter((a) => !a.device_udid);
@@ -252,7 +268,9 @@ export function AssetPicker({ selected, onChange, showFilters, endpoint = "/api/
           <ul className="divide-y divide-base-200">
             {filtered.map((a) => {
               const isSelected = selectedSet.has(a.asset_id);
-              const sc = statusConfig[a.asset_status] || statusConfig.available;
+              const sc = isReservable(a)
+                ? { label: "借出中・可預約", color: "badge-info" }
+                : statusConfig[a.asset_status] || statusConfig.available;
               const Icon = a.device_udid ? Tablet : Package;
               const primary = a.name || a.asset_number || a.serial_number || a.asset_id;
               const secondary = [a.asset_number, a.serial_number, a.model, a.os_version].filter(Boolean).join(" · ");
@@ -272,6 +290,11 @@ export function AssetPicker({ selected, onChange, showFilters, endpoint = "/api/
                     {a.booked_slots && a.booked_slots.length > 0 && (
                       <div className="text-xs text-warning truncate">
                         已預約：{a.booked_slots.map((s) => s.replace(" am", " 上午").replace(" pm", " 下午")).join("、")}
+                      </div>
+                    )}
+                    {a.reservation_enabled && a.booked_ranges && a.booked_ranges.length > 0 && (
+                      <div className="text-xs text-warning" title={a.booked_ranges.map(formatRange).join("\n")}>
+                        已排定：{a.booked_ranges.map(formatRange).join("、")}
                       </div>
                     )}
                     {a.last_return_location && (

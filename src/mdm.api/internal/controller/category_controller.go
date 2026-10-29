@@ -211,6 +211,8 @@ func (c *CategoryController) handleResolveDailyTracking(w http.ResponseWriter, r
 	// half_day_enabled is true only when EVERY given category allows
 	// half-day booking (a mixed batch can't be booked for half a day).
 	halfDay := len(categoryIDs) > 0
+	// reservation_enabled: likewise only when every given category allows it.
+	reservation := len(categoryIDs) > 0
 	for _, cid := range categoryIDs {
 		ok, err := c.rentalRuleRepo.ResolveDailyTrackingRequired(r.Context(), cats, cid)
 		if err != nil {
@@ -228,8 +230,16 @@ func (c *CategoryController) handleResolveDailyTracking(w http.ResponseWriter, r
 		if !hd {
 			halfDay = false
 		}
+		rs, err := c.rentalRuleRepo.ResolveReservationEnabled(r.Context(), cats, cid)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if !rs {
+			reservation = false
+		}
 	}
-	writeJSON(w, map[string]interface{}{"daily_tracking_required": required, "half_day_enabled": halfDay})
+	writeJSON(w, map[string]interface{}{"daily_tracking_required": required, "half_day_enabled": halfDay, "reservation_enabled": reservation})
 }
 
 // handleCategoryRentalRule godoc
@@ -255,22 +265,23 @@ func (c *CategoryController) handleCategoryRentalRule(w http.ResponseWriter, r *
 			// (this GET only reports THIS category's own setting, not the
 			// inherited/resolved value, so the maintenance UI can show
 			// "not set at this level" distinctly from an explicit false).
-			writeJSON(w, map[string]interface{}{"category_id": categoryID, "daily_tracking_required": false, "half_day_enabled": false, "is_explicit": false})
+			writeJSON(w, map[string]interface{}{"category_id": categoryID, "daily_tracking_required": false, "half_day_enabled": false, "reservation_enabled": false, "is_explicit": false})
 			return
 		}
-		writeJSON(w, map[string]interface{}{"category_id": categoryID, "daily_tracking_required": rule.DailyTrackingRequired, "half_day_enabled": rule.HalfDayEnabled, "is_explicit": true})
+		writeJSON(w, map[string]interface{}{"category_id": categoryID, "daily_tracking_required": rule.DailyTrackingRequired, "half_day_enabled": rule.HalfDayEnabled, "reservation_enabled": rule.ReservationEnabled, "is_explicit": true})
 
 	case http.MethodPut:
 		var body struct {
 			// Pointers: omitted fields keep their current value.
 			DailyTrackingRequired *bool `json:"daily_tracking_required"`
 			HalfDayEnabled        *bool `json:"half_day_enabled"`
+			ReservationEnabled    *bool `json:"reservation_enabled"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if err := c.rentalRuleRepo.Upsert(r.Context(), categoryID, body.DailyTrackingRequired, body.HalfDayEnabled, claims.UserID); err != nil {
+		if err := c.rentalRuleRepo.Upsert(r.Context(), categoryID, body.DailyTrackingRequired, body.HalfDayEnabled, body.ReservationEnabled, claims.UserID); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}

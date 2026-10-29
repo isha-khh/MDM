@@ -192,22 +192,37 @@ type RentalPickableAsset struct {
 	// BookedSlots lists open half-day rentals as "YYYY-MM-DD am|pm"; such
 	// assets are not marked "rented" (the other half of the day is still free).
 	BookedSlots []string
+	// OpenWholeDay: any open whole-day rental exists (the old "rented" rule).
+	// HeldNow: an open whole-day or timed rental holds the asset this moment.
+	OpenWholeDay bool
+	HeldNow      bool
+	// BookedRanges lists every open rental's span as "start|end" in Taipei
+	// time ("2006-01-02T15:04"; end empty when open-ended), for showing what a
+	// reservation has to avoid.
+	BookedRanges []string
 }
 
 // ListRentalPickable returns every asset that could potentially be borrowed, plus
-// its MDM device info if linked. Status is computed so the client can filter:
-// "rented" if an open rental exists, otherwise the asset's own asset_status.
+// its MDM device info if linked. The asset's own status is returned as stored;
+// whether it counts as "rented" depends on its category's reservation setting,
+// so the caller decides (see domain.PickableStatus) from OpenWholeDay/HeldNow.
 func (r *AssetRepo) ListRentalPickable(ctx context.Context) ([]*RentalPickableAsset, error) {
 	q := `SELECT a.id, a.asset_number, a.name, COALESCE(a.spec,''),
 	             a.device_udid,
 	             COALESCE(d.serial_number,''), COALESCE(d.model,''), COALESCE(d.os_version,''),
 	             COALESCE(a.asset_status,'available') as asset_status,
 	             a.category_id, COALESCE(c.name,''),
-	             EXISTS(SELECT 1 FROM rentals rl WHERE rl.asset_id = a.id AND rl.period = 'full' AND rl.status IN ('pending','approved','active')) as is_rented,
+	             EXISTS(SELECT 1 FROM rentals rl WHERE rl.asset_id = a.id AND rl.period = 'full' AND rl.status IN ('pending','approved','active')) as open_whole_day,
+	             EXISTS(SELECT 1 FROM rentals rl WHERE rl.asset_id = a.id AND rl.period = 'full' AND rl.status IN ('pending','approved','active') AND rental_span(rl) @> now()) as held_now,
 	             a.last_return_location, a.last_return_at,
 	             ARRAY(SELECT to_char(rl.borrow_date AT TIME ZONE 'UTC','YYYY-MM-DD') || ' ' || rl.period FROM rentals rl
 	                   WHERE rl.asset_id = a.id AND rl.period <> 'full' AND rl.status IN ('pending','approved','active')
-	                   ORDER BY rl.borrow_date, rl.period) as booked_slots
+	                   ORDER BY rl.borrow_date, rl.period) as booked_slots,
+	             ARRAY(SELECT to_char(lower(rental_span(rl)) AT TIME ZONE 'Asia/Taipei','YYYY-MM-DD"T"HH24:MI') || '|' ||
+	                          CASE WHEN upper_inf(rental_span(rl)) THEN '' ELSE to_char(upper(rental_span(rl)) AT TIME ZONE 'Asia/Taipei','YYYY-MM-DD"T"HH24:MI') END
+	                   FROM rentals rl
+	                   WHERE rl.asset_id = a.id AND rl.status IN ('pending','approved','active') AND NOT isempty(rental_span(rl))
+	                   ORDER BY lower(rental_span(rl))) as booked_ranges
 	      FROM assets a
 	      LEFT JOIN devices d ON a.device_udid = d.udid
 	      LEFT JOIN categories c ON a.category_id = c.id
@@ -222,17 +237,13 @@ func (r *AssetRepo) ListRentalPickable(ctx context.Context) ([]*RentalPickableAs
 	var out []*RentalPickableAsset
 	for rows.Next() {
 		it := &RentalPickableAsset{}
-		var isRented bool
 		var lastReturnLocationJSON []byte
 		if err := rows.Scan(&it.AssetID, &it.AssetNumber, &it.Name, &it.Spec,
 			&it.DeviceUdid,
 			&it.SerialNumber, &it.Model, &it.OSVersion,
-			&it.AssetStatus, &it.CategoryID, &it.CategoryName, &isRented,
-			&lastReturnLocationJSON, &it.LastReturnAt, &it.BookedSlots); err != nil {
+			&it.AssetStatus, &it.CategoryID, &it.CategoryName, &it.OpenWholeDay, &it.HeldNow,
+			&lastReturnLocationJSON, &it.LastReturnAt, &it.BookedSlots, &it.BookedRanges); err != nil {
 			continue
-		}
-		if isRented {
-			it.AssetStatus = "rented"
 		}
 		if len(lastReturnLocationJSON) > 0 {
 			json.Unmarshal(lastReturnLocationJSON, &it.LastReturnLocation)
@@ -283,18 +294,22 @@ func (r *AssetRepo) ListPickable(ctx context.Context) ([]domain.PickableAsset, e
 
 // ListAvailableByCategory returns up to `limit` asset IDs that are rentable,
 // available (status=available, not rented), and belong to the given category.
-func (r *AssetRepo) ListAvailableByCategory(ctx context.Context, categoryID, period string, date time.Time, limit int) ([]string, error) {
+//
+// "Not rented" depends on the booking: with reservations, nothing already booked
+// may overlap its time span; without, the asset must have no open rental.
+func (r *AssetRepo) ListAvailableByCategory(ctx context.Context, categoryID string, b domain.Booking, limit int) ([]string, error) {
+	conflict, a2, a3 := bookingConflict(b)
 	q := `SELECT a.id FROM assets a
 	      WHERE a.is_rentable = TRUE
 	        AND a.category_id = $1
 	        AND COALESCE(a.asset_status,'available') = 'available'
 	        AND NOT EXISTS(
 	            SELECT 1 FROM rentals rl
-	            WHERE rl.asset_id = a.id AND `+openRentalConflictSQL("$2::text", "$3")+`
+	            WHERE rl.asset_id = a.id AND ` + conflict + `
 	        )
 	      ORDER BY a.asset_number
 	      LIMIT $4`
-	rows, err := r.pool.Query(ctx, q, categoryID, period, date, limit)
+	rows, err := r.pool.Query(ctx, q, categoryID, a2, a3, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -310,25 +325,44 @@ func (r *AssetRepo) ListAvailableByCategory(ctx context.Context, categoryID, per
 }
 
 // openRentalConflictSQL is a SQL predicate (over rentals alias rl) that is true
-// when rl blocks a new booking of the same asset for the period/date bound to
-// $periodArg/$dateArg. Any open rental blocks, except that two half-day
-// rentals (am/pm) coexist when they fall on different days or different
-// halves of the same day.
-func openRentalConflictSQL(periodArg, dateArg string) string {
+// when rl occupies the asset at any moment of [startArg, endArg) — the
+// timestamptz parameters of the booking being checked; a NULL end means
+// open-ended. rl's own span comes from rental_span() (migration 042), which
+// reads its date, period and optional start/end times. Only open rentals
+// count: pending, approved and active.
+func openRentalConflictSQL(startArg, endArg string) string {
+	return `rl.status IN ('pending','approved','active') AND rental_span(rl) && tstzrange(` +
+		startArg + `::timestamptz, COALESCE(` + endArg + `::timestamptz, 'infinity'::timestamptz), '[)')`
+}
+
+// openRentalLegacyConflictSQL is the rule for categories without reservations:
+// any open rental blocks, except that two half-day rentals (am/pm) coexist when
+// they fall on different days or different halves of the same day.
+func openRentalLegacyConflictSQL(periodArg, dateArg string) string {
 	return `rl.status IN ('pending','approved','active') AND NOT (
 	    rl.period <> 'full' AND ` + periodArg + ` <> 'full'
 	    AND ((rl.borrow_date AT TIME ZONE 'UTC')::date <> ` + dateArg + `::date OR rl.period <> ` + periodArg + `))`
 }
 
+// bookingConflict returns the predicate for a booking plus the values for its
+// $2 and $3 parameters (period/date, or start/end).
+func bookingConflict(b domain.Booking) (sql string, a2, a3 interface{}) {
+	if b.Reservation {
+		return openRentalConflictSQL("$2", "$3"), b.Start, b.End
+	}
+	return openRentalLegacyConflictSQL("$2::text", "$3"), b.Period, b.BorrowDate
+}
+
 // CheckAssetAvailability mirrors rental.CheckDeviceAvailability but uses asset_id,
 // so standalone assets can be checked too.
-// period/date describe the booking being checked ("full" and any date for a whole-day booking).
-func (r *AssetRepo) CheckAssetAvailability(ctx context.Context, assetID, period string, date time.Time) (status string, isRented bool, name string, err error) {
+// isRented is true when an open rental blocks the booking (see Booking).
+func (r *AssetRepo) CheckAssetAvailability(ctx context.Context, assetID string, b domain.Booking) (status string, isRented bool, name string, err error) {
+	conflict, a1, a2 := bookingConflict(b)
 	err = r.pool.QueryRow(ctx,
 		`SELECT COALESCE(a.asset_status,'available'),
-		        EXISTS(SELECT 1 FROM rentals rl WHERE rl.asset_id=$1 AND `+openRentalConflictSQL("$2::text", "$3")+`),
+		        EXISTS(SELECT 1 FROM rentals rl WHERE rl.asset_id=$1 AND `+conflict+`),
 		        COALESCE(a.name, a.asset_number, '')
-		 FROM assets a WHERE a.id=$1`, assetID, period, date,
+		 FROM assets a WHERE a.id=$1`, assetID, a1, a2,
 	).Scan(&status, &isRented, &name)
 	return
 }
