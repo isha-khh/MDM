@@ -15,9 +15,9 @@
 ## 2. 上線步驟
 
 1. 設定 `INTEGRATION_LISTEN_ADDR=:8081`（root `docker-compose.yml` 已有這個變數），重啟 api。
-2. 以系統管理員登入，用 `POST /api/settings/integration/key` 發行 API key（後續會有設定畫面），交給派發系統。**只會顯示一次**；要換就再呼叫一次（輪替，舊的立刻失效）。
-3. 把資源代號對到資產：`PUT /api/settings/integration/resources/RENTAL_CAR_01`，body `{"asset_id": "<車輛資產 ID>"}`。可預約縣市預設為台南市、高雄市、屏東縣，可用 `allowed_cities` 改。
-4. （建議）`PUT /api/settings/integration`：`ip_allowlist` 填派發系統的出口 IP；`auto_create_email_domains` 預設只有 `mail.isha.org.tw`（見 §5）。
+2. 以系統管理員登入，到「系統管理 → 設定」最下方的「派發系統整合 API」，按「發行 API key」（對應 `POST /api/settings/integration/key`），交給派發系統。**只會顯示一次**；要換就按「輪替 key」（舊的立刻失效）。
+3. 在同一張卡片的「資源（車輛）對應」，把資源代號（如 `RENTAL_CAR_01`）對到車輛資產。可預約縣市預設為台南市、高雄市、屏東縣，可以改；暫時不開放用「停用」，不要移除對應（移除後派發系統查不到這輛車已建立的預約）。
+4. （建議）填「IP 白名單」（派發系統的出口 IP）；「可自動建立借用人帳號的 email 網域」預設只有 `mail.isha.org.tw`（見 §5）。
 5. 該車所屬分類在「分類管理」打開「可預約」：沒開的話，網頁上有人用舊的「借出中就不能借」規則借這輛車時，會被未來的預約擋住。
 6. 設定 Cloudflare Tunnel（§3）。
 
