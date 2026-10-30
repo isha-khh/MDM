@@ -20,8 +20,16 @@ import (
 // (spec §7). It is served on its own listener — separate from the web UI's
 // API — and authenticated by API key only.
 type IntegrationController struct {
-	svc  *service.ReservationService
-	auth *middleware.IntegrationAuth
+	svc        *service.ReservationService
+	auth       *middleware.IntegrationAuth
+	requestLog *RequestLog
+}
+
+// WithRequestLog keeps the recent calls for the settings screen (every call is
+// written to the server log either way).
+func (c *IntegrationController) WithRequestLog(l *RequestLog) *IntegrationController {
+	c.requestLog = l
+	return c
 }
 
 func NewIntegrationController(svc *service.ReservationService, auth *middleware.IntegrationAuth) *IntegrationController {
@@ -43,7 +51,7 @@ func (c *IntegrationController) Handler() http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, &domain.APIError{Status: http.StatusNotFound, Code: domain.CodeNotFound, Message: "no such endpoint"})
 	})
-	return mux
+	return c.logged(mux)
 }
 
 type authedHandler func(w http.ResponseWriter, r *http.Request, client *domain.IntegrationClient, actor postgres.Actor)
@@ -52,9 +60,15 @@ func (c *IntegrationController) authed(h authedHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		client, ip, err := c.auth.Authenticate(r)
 		if err != nil {
+			if client != nil {
+				noteCaller(w, client.Name, ip, "")
+			} else {
+				noteCaller(w, "", ip, keyHint(r))
+			}
 			writeAPIError(w, err)
 			return
 		}
+		noteCaller(w, client.Name, ip, "")
 		r.Body = http.MaxBytesReader(w, r.Body, maxIntegrationBody)
 		h(w, r, client, postgres.Actor{ClientID: client.ID, ClientName: client.Name, IP: ip})
 	}
@@ -65,6 +79,9 @@ func writeAPIError(w http.ResponseWriter, err error) {
 	if !errors.As(err, &ae) {
 		log.Printf("[integration-api] internal error: %v", err)
 		ae = &domain.APIError{Status: http.StatusInternalServerError, Code: domain.CodeInternal, Message: "內部錯誤"}
+	}
+	if n, ok := w.(noter); ok {
+		n.noteError(ae.Code, ae.Message)
 	}
 	details := ae.Details
 	if details == nil {
