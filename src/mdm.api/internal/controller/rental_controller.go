@@ -329,6 +329,18 @@ func (c *RentalController) handleRentals(w http.ResponseWriter, r *http.Request)
 				"return_reported_by":        rl.ReturnReportedBy,
 				"cross_day_reason":          rl.CrossDayReason,
 			}
+			// Details of bookings made through the integration API (the dispatch
+			// system); a timed one has an exact span, other rentals only dates.
+			row["created_via"], row["external_ref"] = rl.CreatedVia, rl.ExternalRef
+			row["passengers"], row["destination"] = rl.Passengers, rl.Destination
+			row["cancel_reason"], row["borrower_email"] = rl.CancelReason, rl.BorrowerEmail
+			row["start_at"], row["end_at"] = nil, nil
+			if rl.StartAt != nil {
+				row["start_at"] = domain.FormatAPITime(*rl.StartAt)
+			}
+			if rl.EndAt != nil {
+				row["end_at"] = domain.FormatAPITime(*rl.EndAt)
+			}
 			if rl.ReturnReportedAt != nil {
 				row["return_reported_at"] = rl.ReturnReportedAt.Format(time.RFC3339)
 			} else {

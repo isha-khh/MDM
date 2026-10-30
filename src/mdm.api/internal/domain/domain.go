@@ -245,9 +245,20 @@ type Rental struct {
 	// Period is "full" (whole day, default), "am" or "pm". Half-day periods
 	// are only allowed on single-day rentals of categories with HalfDayEnabled.
 	Period    string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	// StartAt/EndAt are the exact span of a timed booking (made through the
+	// integration API); nil for ordinary date-based rentals.
+	StartAt, EndAt *time.Time
+	// ExternalRef, Passengers, Destination and CancelReason come with bookings
+	// made through the integration API (CreatedVia "api"; "web" otherwise).
+	ExternalRef  *string
+	CreatedVia   string
+	Passengers   []string
+	Destination  *Destination
+	CancelReason string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 	// Joined fields (read-only)
+	BorrowerEmail string
 	DeviceName   string
 	DeviceSerial string
 	AssetNumber  string
