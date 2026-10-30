@@ -24,6 +24,13 @@ type IntegrationSettingsController struct {
 	auth       *middleware.AuthHelper
 	listenAddr string // integration listener address; empty = the API is switched off
 	webhook    WebhookStatus
+	requestLog *RequestLog
+}
+
+// WithRequestLog lets the settings screen list the recent calls to the integration API.
+func (c *IntegrationSettingsController) WithRequestLog(l *RequestLog) *IntegrationSettingsController {
+	c.requestLog = l
+	return c
 }
 
 // WebhookStatus is what the settings screen shows about the webhook to the
@@ -43,6 +50,8 @@ func (c *IntegrationSettingsController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/settings/integration", c.handleUpdate)
 	mux.HandleFunc("POST /api/settings/integration/key", c.handleKey)
 	mux.HandleFunc("POST /api/settings/integration/webhook/retry", c.handleWebhookRetry)
+	mux.HandleFunc("GET /api/settings/integration/requests", c.handleRequests)
+	mux.HandleFunc("GET /api/settings/integration/requests/{id}", c.handleRequest)
 	mux.HandleFunc("PUT /api/settings/integration/resources/{id}", c.handlePutResource)
 	mux.HandleFunc("DELETE /api/settings/integration/resources/{id}", c.handleDeleteResource)
 }
@@ -248,6 +257,41 @@ func (c *IntegrationSettingsController) handleUpdate(w http.ResponseWriter, r *h
 		return
 	}
 	writeJSON(w, st)
+}
+
+// @Summary 最近的整合 API 呼叫紀錄（sys_admin；僅保留在記憶體，重啟後清空）
+// @Tags Settings
+// @Security BearerAuth
+// @Router /api/settings/integration/requests [get]
+func (c *IntegrationSettingsController) handleRequests(w http.ResponseWriter, r *http.Request) {
+	if _, err := c.auth.RequireSysAdmin(r); err != nil {
+		writeError(w, http.StatusForbidden, "sys_admin required")
+		return
+	}
+	limit := 100
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 200 {
+		limit = n
+	}
+	writeJSON(w, map[string]interface{}{"requests": c.requestLog.Recent(limit)})
+}
+
+// @Summary 單筆整合 API 呼叫的傳入與傳出內容（sys_admin）
+// @Tags Settings
+// @Security BearerAuth
+// @Router /api/settings/integration/requests/{id} [get]
+func (c *IntegrationSettingsController) handleRequest(w http.ResponseWriter, r *http.Request) {
+	if _, err := c.auth.RequireSysAdmin(r); err != nil {
+		writeError(w, http.StatusForbidden, "sys_admin required")
+		return
+	}
+	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
+	rec, ok := c.requestLog.Get(id)
+	if err != nil || !ok {
+		writeError(w, http.StatusNotFound, "找不到這筆紀錄（可能已被較新的紀錄擠掉，或服務已重啟）")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, rec)
 }
 
 // @Summary 把送給派發系統失敗（已放棄）的事件重新排入佇列（sys_admin）

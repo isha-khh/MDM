@@ -169,7 +169,30 @@ MDM 的 `username` 不一定等於 AD 帳號：只有經 SSO 建立／綁定的�
 - 同一筆預約的事件依發生順序送：前一個還沒送成功，後一個等著，不會超前。不同預約之間彼此獨立。
 - 事件先寫進資料庫佇列（`integration_webhook_outbox`）再由背景工作送，所以 MDM 重啟或派發系統暫時不通都不會掉事件；已送成功的保留 30 天。
 
-## 7. 尚未實作
+## 7. 呼叫紀錄（查「派發系統到底有沒有呼叫、被什麼擋掉」）
+
+整合 API 的每一次呼叫（`/healthz` 除外）都會記錄，兩個地方：
+
+- **伺服器 log**（`docker compose logs api | grep integration-api`），每次一行，長期保留（依 docker log 設定）：
+
+  ```
+  [integration-api] POST /api/v1/reservations 409 VEHICLE_UNAVAILABLE 4ms client=派發系統 ip=203.0.113.7
+  [integration-api] GET /api/v1/reservations 401 UNAUTHORIZED 0ms client=- ip=198.51.100.9 key=mdm_oldKey…
+  ```
+
+  內容只有方法、路徑、狀態碼、錯誤代碼、耗時、呼叫端、來源 IP；重送回放的會加 `replayed`；用了無法辨識的 key（例如輪替前的舊 key）時，只記它的前 10 個字元，用來判斷用的是哪一把。**不含 API key、請求內容、回應內容。**
+- **設定畫面最下方「最近的 API 呼叫」**：最近 200 筆，只放在伺服器記憶體（重啟後清空），只有系統管理員看得到。點一列展開成兩欄：左邊「傳入參數」（請求、呼叫端、來源 IP、Idempotency-Key、請求內容），右邊「傳出參數」（HTTP 狀態、錯誤代碼與訊息、耗時、回應內容）。每筆的請求與回應內容各只保留前 8 KB；內容裡會有借用人 email、目的地等個資，所以不寫進 log。
+
+判讀：
+
+| 看到 | 意思 |
+|---|---|
+| 完全沒有那一筆 | 請求沒到 MDM（tunnel、WAF 或網址的問題） |
+| `401`，`client=-` | 沒帶 key 或 key 無效；`key=` 的前綴可對照設定畫面顯示的目前 key 前綴，不同就是用了舊 key |
+| `403`，有 `client=` | key 對，但已停用，或來源 IP 不在白名單（看 `ip=`） |
+| `409` / `422` / `400` | 請求到了、驗證過了，業務規則不允許；錯誤代碼與訊息說明原因 |
+
+## 8. 尚未實作
 
 - §7.7 每日對帳：由派發系統端用 `GET /reservations?from=…&to=…` 比對，MDM 不需再做。
 - 一張網頁租借單同時租兩輛不同的整合資源車輛時，只回報第一輛（預約編號 `R-{rental_number}` 對兩輛是同一個）；目前只有一輛車，不影響。

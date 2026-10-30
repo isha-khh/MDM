@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Copy, KeyRound, Plug, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import apiClient from "../lib/apiClient";
 import { useDialog } from "./DialogProvider";
+import { IntegrationRequestLog } from "./IntegrationRequestLog";
 
 interface IntegrationClient {
   name: string;
@@ -356,6 +357,10 @@ export function IntegrationSettings() {
             <Plus size={14} />新增／更新
           </button>
         </div>
+
+        {/* 呼叫紀錄 */}
+        <div className="divider my-1 text-sm">最近的 API 呼叫</div>
+        <IntegrationRequestLog />
       </div>
     </div>
   );

@@ -95,27 +95,30 @@ func authError(status int, code, msg string) *domain.APIError {
 	return &domain.APIError{Status: status, Code: code, Message: msg}
 }
 
-// Authenticate returns the calling client and its address, or the error to send back.
+// Authenticate returns the calling client and its address, or the error to send
+// back. The address is always set; the client is also set when the key was
+// recognised but the call was refused (key disabled, address not allowed), so
+// the refusal can be attributed.
 func (a *IntegrationAuth) Authenticate(r *http.Request) (*domain.IntegrationClient, string, error) {
+	ip := a.ClientIP(r) // known even when the call is refused, so the refusal can be traced
 	h := r.Header.Get("Authorization")
 	scheme, key, ok := strings.Cut(h, " ")
 	key = strings.TrimSpace(key)
 	if !ok || !strings.EqualFold(scheme, "Bearer") || key == "" {
-		return nil, "", authError(http.StatusUnauthorized, domain.CodeUnauthorized, "需要 Authorization: Bearer <API key>")
+		return nil, ip, authError(http.StatusUnauthorized, domain.CodeUnauthorized, "需要 Authorization: Bearer <API key>")
 	}
 	client, err := a.store.ClientByKeyHash(r.Context(), HashKey(key))
 	if err != nil {
-		return nil, "", err
+		return nil, ip, err
 	}
 	if client == nil {
-		return nil, "", authError(http.StatusUnauthorized, domain.CodeUnauthorized, "API key 無效")
+		return nil, ip, authError(http.StatusUnauthorized, domain.CodeUnauthorized, "API key 無效")
 	}
 	if !client.Enabled {
-		return nil, "", authError(http.StatusForbidden, domain.CodeForbidden, "此 API key 已停用")
+		return client, ip, authError(http.StatusForbidden, domain.CodeForbidden, "此 API key 已停用")
 	}
-	ip := a.ClientIP(r)
 	if !domain.IPAllowed(ip, client.IPAllowlist) {
-		return nil, ip, authError(http.StatusForbidden, domain.CodeForbidden, "來源 IP 不在允許清單內")
+		return client, ip, authError(http.StatusForbidden, domain.CodeForbidden, "來源 IP 不在允許清單內")
 	}
 	a.store.TouchClient(r.Context(), client.ID)
 	return client, ip, nil
