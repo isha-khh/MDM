@@ -15,6 +15,8 @@ import { DataGrid } from "../components/DataGrid";
 import { type ChecklistItem, type ChecklistAnswers, isChecklistItemFilled } from "../lib/checklist";
 import { ChecklistFields } from "../components/ChecklistFields";
 import { type Rental, type RentalGroup, type DailyReport, groupByRentalNumber, periodLabel } from "../lib/rentalTypes";
+import { rentalPoint, rentalStartDate, rentalSpanText, taipeiToday } from "../lib/rentalTime";
+import { RentalDetailCard } from "../components/RentalDetailCard";
 import { minExtendDate } from "../lib/dates";
 
 interface UserOption {
@@ -447,18 +449,28 @@ export function Rentals() {
     } finally { setReviewSubmitting(false); }
   };
 
-  const doAction = async (rentalId: string, action: string) => {
+  // Handing over before the booked day marks the car as out (and tells the
+  // dispatch system so) while it is still in the lot, so ask first.
+  const activateConfirmText = (g: RentalGroup) => {
+    const start = rentalStartDate(g);
+    if (start <= taipeiToday()) return undefined;
+    return `這筆租借排定在 ${rentalSpanText(g)}，還沒到借出日。現在就借出嗎？\n（借出後狀態會變成「借出中」，請確認是現在要交車。）`;
+  };
+
+  const doAction = async (rentalId: string, action: string, confirmText?: string) => {
     const labels: Record<string, string> = {
       approve: "核准此租借申請（整批）？",
       activate: "確認借出裝置（整批）？",
       reject: "拒絕此租借申請（整批）？",
     };
-    if (!(await dialog.confirm(labels[action] || `${action}?`))) return;
+    if (!(await dialog.confirm(confirmText || labels[action] || `${action}?`))) return;
     try {
       await apiClient.post(`/api/rentals/${rentalId}/${action}`);
       loadRentals();
     } catch (err) {
-      await dialog.error("操作失敗: " + (err instanceof Error ? err.message : ""));
+      // The server says why (e.g. the previous borrower has not returned the car yet).
+      const serverMsg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      await dialog.error("操作失敗: " + (serverMsg || (err instanceof Error ? err.message : "")));
     }
   };
 
@@ -617,7 +629,20 @@ export function Rentals() {
     });
     defs.push({ headerName: "借用人", field: "borrower_name", width: 120, cellClass: "font-medium" });
     defs.push({ headerName: "保管人", field: "custodian_name", width: 120, cellClass: "text-sm opacity-70", valueFormatter: (p) => p.value || "-" });
-    defs.push({ headerName: "用途", field: "purpose", minWidth: 140, cellClass: "text-sm", valueFormatter: (p) => p.value || "-" });
+    defs.push({
+      headerName: "用途",
+      field: "purpose",
+      minWidth: 160,
+      cellClass: "text-sm",
+      cellRenderer: (p: ICellRendererParams<RentalGroup>) => (
+        <span className="inline-flex items-center gap-1 max-w-full">
+          {p.data?.created_via === "api" && (
+            <span className="badge badge-xs badge-primary badge-outline whitespace-nowrap shrink-0" title={p.data.external_ref || "派發系統建立"}>派發系統</span>
+          )}
+          <span className="truncate">{p.value || "-"}</span>
+        </span>
+      ),
+    });
     defs.push({
       headerName: "狀態",
       field: "status",
@@ -632,10 +657,14 @@ export function Rentals() {
       field: "borrow_date",
       width: 170,
       cellClass: "text-sm opacity-70",
+      tooltipValueGetter: (p) => (p.data ? rentalSpanText(p.data) : ""),
       valueFormatter: (p) => {
         if (!p.value) return "-";
+        const g = p.data as RentalGroup | undefined;
+        // 派發系統的預約到分鐘：顯示「11/26 09:16」
+        if (g?.start_at) return rentalPoint(g, "start");
         const d = new Date(p.value as string).toLocaleDateString();
-        const per = (p.data as RentalGroup | undefined)?.period;
+        const per = g?.period;
         return per && per !== "full" ? `${d} ${periodLabel[per]}` : d;
       },
     });
@@ -646,7 +675,7 @@ export function Rentals() {
       cellClass: "text-sm",
       cellRenderer: (p: ICellRendererParams<RentalGroup>) => (
         <span>
-          <span className="opacity-70">{p.value || "-"}</span>
+          <span className="opacity-70">{p.data?.end_at ? rentalPoint(p.data, "end") : (p.value || "-")}</span>
           {p.data?.pending_extension && (
             <span
               className="badge badge-warning badge-xs ml-1 whitespace-nowrap"
@@ -678,7 +707,7 @@ export function Rentals() {
               </>
             )}
             {g.status === "approved" && isAdmin && (
-              <button onClick={() => doAction(firstRentalId, "activate")} className="btn btn-primary btn-xs gap-1"><Play size={12} /> 借出</button>
+              <button onClick={() => doAction(firstRentalId, "activate", activateConfirmText(g))} className="btn btn-primary btn-xs gap-1"><Play size={12} /> 借出</button>
             )}
             {g.status === "active" && (isAdmin || g.borrower_id === user?.id) && (
               <button onClick={() => openReturnDialog(g, "submit")} className="btn btn-warning btn-xs gap-1"><RotateCcw size={12} /> 我要歸還</button>
@@ -701,30 +730,6 @@ export function Rentals() {
     });
     return defs;
   }, [canExport, selectedNumbers, groups.length, isAdmin, user]);
-
-  const detailCellRendererParams = useMemo(() => ({
-    detailGridOptions: {
-      columnDefs: [
-        { headerName: "#", valueGetter: (p: any) => (p.node?.rowIndex ?? 0) + 1, width: 60 },
-        {
-          headerName: "名稱",
-          flex: 1,
-          valueGetter: (p: any) => p.data?.device_name || p.data?.asset_name || p.data?.device_serial || p.data?.asset_number || "-",
-        },
-        {
-          headerName: "序號/財產編號",
-          flex: 1,
-          cellClass: "font-mono text-xs",
-          valueGetter: (p: any) => p.data?.device_serial || p.data?.asset_number || "-",
-        },
-      ] as ColDef<Rental>[],
-      defaultColDef: { sortable: false, filter: false, resizable: true },
-      domLayout: "autoHeight" as const,
-      headerHeight: 32,
-      rowHeight: 32,
-    },
-    getDetailRowData: (p: any) => { p.successCallback((p.data as RentalGroup).rentals); },
-  }), []);
 
   // Export + archive
   const handleExportAndArchive = async () => {
@@ -978,10 +983,9 @@ export function Rentals() {
           getRowId={(p) => String(p.data.rental_number)}
           overlayNoRowsTemplate={`<span class="opacity-50">尚無租借記錄</span>`}
           masterDetail
-          detailCellRendererParams={detailCellRendererParams}
-          // AG Grid defaults the detail row slot to 300px (≈7 rows × 36px),
-          // which clipped rentals with >7 devices. Letting the slot auto-fit
-          // makes >10 devices visible without scrolling inside the detail.
+          detailCellRenderer={RentalDetailCard}
+          // AG Grid defaults the detail row slot to 300px, which would clip a
+          // long list of assets; auto-fit lets the card take the height it needs.
           detailRowAutoHeight
           getRowClass={(p) => p.data?.is_archived ? "opacity-50" : ""}
         />

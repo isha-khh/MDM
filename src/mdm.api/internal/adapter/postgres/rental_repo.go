@@ -25,11 +25,13 @@ const rentalSelectColumns = `r.id, r.asset_id, r.device_udid, r.borrower_id, r.b
 	             COALESCE(a.asset_number,'') as asset_number, COALESCE(a.name,'') as asset_name,
 	             a.custodian_id, COALESCE(a.custodian_name,'') as custodian_name,
 	             r.rental_number, r.is_archived, r.return_checklist, r.return_notes, r.multi_day_reason, a.category_id,
-	             r.return_checklist_reported, r.return_reported_by, r.return_reported_at, r.return_verified_by, r.cross_day_reason, r.period`
+	             r.return_checklist_reported, r.return_reported_by, r.return_reported_at, r.return_verified_by, r.cross_day_reason, r.period,
+	             r.start_at, r.end_at, r.external_ref, r.created_via, r.passengers, r.destination, r.cancel_reason, COALESCE(bu.email,'')`
 
 const rentalFromJoin = `FROM rentals r
 	LEFT JOIN assets a ON a.id = r.asset_id
-	LEFT JOIN devices d ON d.udid = COALESCE(r.device_udid, a.device_udid)`
+	LEFT JOIN devices d ON d.udid = COALESCE(r.device_udid, a.device_udid)
+	LEFT JOIN users bu ON bu.id = r.borrower_id`
 
 func scanRental(rows interface {
 	Scan(dest ...interface{}) error
@@ -38,7 +40,7 @@ func scanRental(rows interface {
 	var assetID, approverID *string
 	var deviceUdid *string
 	var expectedReturn, actualReturn, returnReportedAt *time.Time
-	var checklistJSON, checklistReportedJSON []byte
+	var checklistJSON, checklistReportedJSON, destinationJSON []byte
 	err := rows.Scan(
 		&rental.ID, &assetID, &deviceUdid, &rental.BorrowerID, &rental.BorrowerName,
 		&approverID, &rental.ApproverName,
@@ -50,6 +52,8 @@ func scanRental(rows interface {
 		&rental.RentalNumber, &rental.IsArchived, &checklistJSON, &rental.ReturnNotes,
 		&rental.MultiDayReason, &rental.CategoryID,
 		&checklistReportedJSON, &rental.ReturnReportedBy, &returnReportedAt, &rental.ReturnVerifiedBy, &rental.CrossDayReason, &rental.Period,
+		&rental.StartAt, &rental.EndAt, &rental.ExternalRef, &rental.CreatedVia, &rental.Passengers, &destinationJSON,
+		&rental.CancelReason, &rental.BorrowerEmail,
 	)
 	if err != nil {
 		return nil, err
@@ -67,6 +71,15 @@ func scanRental(rows interface {
 	}
 	if len(checklistReportedJSON) > 0 {
 		json.Unmarshal(checklistReportedJSON, &rental.ReturnChecklistReported)
+	}
+	if len(destinationJSON) > 0 {
+		var dest domain.Destination
+		if json.Unmarshal(destinationJSON, &dest) == nil {
+			rental.Destination = &dest
+		}
+	}
+	if rental.Passengers == nil {
+		rental.Passengers = []string{}
 	}
 	return rental, nil
 }

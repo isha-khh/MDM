@@ -48,6 +48,21 @@ export interface Rental {
   period?: "full" | "am" | "pm";
   daily_tracking_required?: boolean;
   pending_extension?: RentalExtension | null;
+  // 派發系統（整合 API）建立的預約才有確切時段、單號、乘客與目的地
+  created_via?: "web" | "api";
+  start_at?: string | null;
+  end_at?: string | null;
+  external_ref?: string | null;
+  passengers?: string[];
+  destination?: RentalDestination | null;
+  cancel_reason?: string;
+  borrower_email?: string;
+}
+
+export interface RentalDestination {
+  address?: string;
+  city?: string;
+  district?: string;
 }
 
 export interface RentalGroup {
@@ -72,6 +87,15 @@ export interface RentalGroup {
   period?: "full" | "am" | "pm";
   daily_tracking_required?: boolean;
   pending_extension?: RentalExtension | null;
+  created_via?: "web" | "api";
+  start_at?: string | null;
+  end_at?: string | null;
+  external_ref?: string | null;
+  passengers?: string[];
+  destination?: RentalDestination | null;
+  cancel_reason?: string;
+  borrower_email?: string;
+  notes?: string;
 }
 
 export interface DailyReport {
@@ -80,6 +104,21 @@ export interface DailyReport {
   checklist: Record<string, unknown>;
   backfill_reason: string;
   reported_at: string;
+}
+
+function pickBookingDetails(items: Rental[]) {
+  const r = items.find((it) => it.created_via === "api") ?? items[0];
+  return {
+    created_via: r.created_via,
+    start_at: r.start_at,
+    end_at: r.end_at,
+    external_ref: r.external_ref,
+    passengers: r.passengers,
+    destination: r.destination,
+    cancel_reason: r.cancel_reason,
+    borrower_email: r.borrower_email,
+    notes: r.notes,
+  };
 }
 
 export function groupByRentalNumber(rentals: Rental[]): RentalGroup[] {
@@ -113,6 +152,9 @@ export function groupByRentalNumber(rentals: Rental[]): RentalGroup[] {
       multi_day_reason: first.multi_day_reason,
       period: first.period,
       pending_extension: first.pending_extension,
+      // A booking made through the dispatch system carries its own details; in a
+      // batch that mixes one with other assets, they belong to that rental.
+      ...pickBookingDetails(items),
       // Union across the batch, matching the backend's own union policy for
       // "does this batch touch any daily-tracking category".
       daily_tracking_required: items.some((it) => it.daily_tracking_required),
