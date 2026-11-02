@@ -33,6 +33,7 @@ type apiEnv struct {
 	key    string
 	client string // integration client id
 	asset  string
+	reqLog *RequestLog
 }
 
 type apiResp struct {
@@ -80,7 +81,8 @@ func newAPIEnv(t *testing.T) *apiEnv {
 		t.Fatal(err)
 	}
 	svc := service.NewReservationService(repo, postgres.NewReservationRepo(pool), postgres.NewUserRepo(pool))
-	e.srv = httptest.NewServer(NewIntegrationController(svc, auth).Handler())
+	e.reqLog = NewRequestLog(100)
+	e.srv = httptest.NewServer(NewIntegrationController(svc, auth).WithRequestLog(e.reqLog).Handler())
 	t.Cleanup(e.srv.Close)
 	return e
 }

@@ -114,6 +114,9 @@ func main() {
 		log.Printf("[mdm-webhook] disabled (DISPATCH_WEBHOOK_URL not set)")
 	}
 
+	// The most recent calls to the integration API, for the settings screen.
+	integrationRequests := controller.NewRequestLog(200)
+
 	// Auth helper (module-level permission checks)
 	authHelper := middleware.NewAuthHelper(cfg.JWTSecret, permissionRepo)
 
@@ -316,7 +319,7 @@ func main() {
 		controller.NewNotificationController(notificationRepo, authHelper),
 		controller.NewSettingsController(mailSettingsRepo, smtpSender, authHelper),
 		controller.NewIntegrationSettingsController(integrationRepo, auditRepo, authHelper, cfg.IntegrationListenAddr,
-			controller.WebhookStatus{Outbox: webhookOutbox, URL: cfg.DispatchWebhookURL, Enabled: reservationEvents != nil}),
+			controller.WebhookStatus{Outbox: webhookOutbox, URL: cfg.DispatchWebhookURL, Enabled: reservationEvents != nil}).WithRequestLog(integrationRequests),
 	)
 
 	// CORS
@@ -346,7 +349,7 @@ func main() {
 		reservationSvc := service.NewReservationService(integrationRepo, reservationRepo, userRepo)
 		integrationSrv = &http.Server{
 			Addr:              cfg.IntegrationListenAddr,
-			Handler:           controller.NewIntegrationController(reservationSvc, integrationAuth).Handler(),
+			Handler:           controller.NewIntegrationController(reservationSvc, integrationAuth).WithRequestLog(integrationRequests).Handler(),
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       30 * time.Second,
 			WriteTimeout:      60 * time.Second,
