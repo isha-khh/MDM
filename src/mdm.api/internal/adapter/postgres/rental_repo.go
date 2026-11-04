@@ -257,6 +257,17 @@ func (r *RentalRepo) Archive(ctx context.Context, ids []string) error {
 	return err
 }
 
+// Unarchive brings archived rentals back into the normal list and reports how
+// many it restored (ids that are not archived, or do not exist, are skipped).
+func (r *RentalRepo) Unarchive(ctx context.Context, ids []string) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE rentals SET is_archived = false, updated_at = now() WHERE is_archived AND id = ANY($1::uuid[])`, ids)
+	return tag.RowsAffected(), err
+}
+
 func (r *RentalRepo) ListDeviceUdidsByNumber(ctx context.Context, rentalNumber int) ([]string, error) {
 	rows, err := r.pool.Query(ctx, `SELECT device_udid FROM rentals WHERE rental_number=$1 AND device_udid IS NOT NULL`, rentalNumber)
 	if err != nil {

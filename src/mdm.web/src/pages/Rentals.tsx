@@ -6,7 +6,7 @@ import { CategoryLeafSelect } from "../components/CategoryLeafSelect";
 import apiClient from "../lib/apiClient";
 import DOMPurify from "dompurify";
 import { useDialog } from "../components/DialogProvider";
-import {
+import { ArchiveRestore,
   Check, X, RotateCcw, Play, UserPlus, Clock,
   CheckCircle, AlertCircle, ArrowRight, FileDown, Archive, Plus, Trash2, Gauge, CalendarPlus,
 } from "lucide-react";
@@ -17,6 +17,7 @@ import { ChecklistFields } from "../components/ChecklistFields";
 import { type Rental, type RentalGroup, type DailyReport, groupByRentalNumber, periodLabel } from "../lib/rentalTypes";
 import { rentalPoint, rentalStartDate, rentalSpanText, taipeiToday } from "../lib/rentalTime";
 import { RentalDetailCard } from "../components/RentalDetailCard";
+import { ArchivedRentalsDialog } from "../components/ArchivedRentalsDialog";
 import { minExtendDate } from "../lib/dates";
 
 interface UserOption {
@@ -81,6 +82,7 @@ export function Rentals() {
   const [createTab, setCreateTab] = useState<"asset" | "category">("asset");
   const [statusFilter, setStatusFilter] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [showArchivedDialog, setShowArchivedDialog] = useState(false);
 
   // Selection — by rental_number
   const [selectedNumbers, setSelectedNumbers] = useState<Set<number>>(new Set());
@@ -966,6 +968,9 @@ export function Rentals() {
             <Archive size={14} /> 匯出記錄並存查
             {selectedNumbers.size > 0 && <span className="badge badge-sm">{selectedNumbers.size}</span>}
           </button>
+          <button onClick={() => setShowArchivedDialog(true)} className="btn btn-outline btn-sm gap-1">
+            <ArchiveRestore size={14} /> 顯示已存查
+          </button>
           {selectedNumbers.size > 0 && (
             <span className="text-sm text-base-content/60">
               已選 {selectedNumbers.size} 筆
@@ -990,6 +995,7 @@ export function Rentals() {
           getRowClass={(p) => p.data?.is_archived ? "opacity-50" : ""}
         />
       </div>
+      <ArchivedRentalsDialog open={showArchivedDialog} onClose={() => setShowArchivedDialog(false)} onRestored={loadRentals} />
       {/* Return checklist dialog — items resolved dynamically per分類 (Phase 2a) */}
       <dialog className={`modal ${returnGroup ? "modal-open" : ""}`}>
         <div className="modal-box">

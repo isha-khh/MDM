@@ -57,6 +57,7 @@ export interface Rental {
   destination?: RentalDestination | null;
   cancel_reason?: string;
   borrower_email?: string;
+  updated_at?: string;
 }
 
 export interface RentalDestination {
@@ -96,6 +97,7 @@ export interface RentalGroup {
   cancel_reason?: string;
   borrower_email?: string;
   notes?: string;
+  updated_at?: string;
 }
 
 export interface DailyReport {
@@ -118,6 +120,7 @@ function pickBookingDetails(items: Rental[]) {
     cancel_reason: r.cancel_reason,
     borrower_email: r.borrower_email,
     notes: r.notes,
+    updated_at: items.map((it) => it.updated_at || "").sort().pop() || undefined,
   };
 }
 
