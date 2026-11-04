@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useAuthStore } from "../stores/authStore";
 import { useTranslation } from "react-i18next";
 import { AssetPicker } from "../components/AssetPicker";
@@ -8,14 +8,14 @@ import DOMPurify from "dompurify";
 import { useDialog } from "../components/DialogProvider";
 import { ArchiveRestore,
   Check, X, RotateCcw, Play, UserPlus, Clock,
-  CheckCircle, AlertCircle, ArrowRight, FileDown, Archive, Plus, Trash2, Gauge, CalendarPlus,
+  CheckCircle, AlertCircle, ArrowRight, FileDown, Archive, Plus, Trash2, Gauge, CalendarPlus, Columns3,
 } from "lucide-react";
-import type { ColDef, ICellRendererParams } from "ag-grid-enterprise";
+import type { ColDef, GridApi, GridReadyEvent, ICellRendererParams } from "ag-grid-enterprise";
 import { DataGrid } from "../components/DataGrid";
 import { type ChecklistItem, type ChecklistAnswers, isChecklistItemFilled } from "../lib/checklist";
 import { ChecklistFields } from "../components/ChecklistFields";
-import { type Rental, type RentalGroup, type DailyReport, groupByRentalNumber, periodLabel } from "../lib/rentalTypes";
-import { rentalPoint, rentalStartDate, rentalSpanText, taipeiToday } from "../lib/rentalTime";
+import { type Rental, type RentalGroup, type DailyReport, groupByRentalNumber } from "../lib/rentalTypes";
+import { rentalSpanText, rentalSpanTitle, rentalStartDate, taipeiToday } from "../lib/rentalTime";
 import { RentalDetailCard } from "../components/RentalDetailCard";
 import { ArchivedRentalsDialog } from "../components/ArchivedRentalsDialog";
 import { minExtendDate } from "../lib/dates";
@@ -70,6 +70,18 @@ async function uploadChecklistPhoto(file: File, item: ChecklistItem, rentalNumbe
   return data.id;
 }
 
+// 欄位的顯示、順序、寬度記在這個瀏覽器；欄位組合改版時換 key，舊的設定就不會套用。
+const COLUMN_STATE_KEY = "mdm.rentals.columns.v2";
+
+function loadColumnState() {
+  try {
+    const raw = localStorage.getItem(COLUMN_STATE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function Rentals() {
   const { t } = useTranslation();
   const { user } = useAuthStore();
@@ -103,6 +115,24 @@ export function Rentals() {
   const [catLines, setCatLines] = useState<{ categoryId: string; quantity: number }[]>([{ categoryId: "", quantity: 1 }]);
 
   const groups = useMemo(() => groupByRentalNumber(rentals), [rentals]);
+
+  const gridApi = useRef<GridApi | null>(null);
+  const onGridReady = (e: GridReadyEvent) => {
+    gridApi.current = e.api;
+    const saved = loadColumnState();
+    if (saved) e.api.applyColumnState({ state: saved, applyOrder: true });
+  };
+  const saveColumnState = () => {
+    if (!gridApi.current) return;
+    try {
+      localStorage.setItem(COLUMN_STATE_KEY, JSON.stringify(gridApi.current.getColumnState()));
+    } catch { /* storage unavailable: the layout just won't be remembered */ }
+  };
+  const resetColumns = () => {
+    gridApi.current?.resetColumnState();
+    // resetting fires the column events, which save the default layout; forget it again after they have run
+    setTimeout(() => { try { localStorage.removeItem(COLUMN_STATE_KEY); } catch { /* ignore */ } }, 0);
+  };
 
   const loadRentals = async () => {
     setLoading(true);
@@ -556,47 +586,50 @@ export function Rentals() {
 
   const columnDefs = useMemo<ColDef<RentalGroup>[]>(() => {
     const defs: ColDef<RentalGroup>[] = [];
-    if (canExport) {
-      defs.push({
-        headerName: "",
-        colId: "select",
-        width: 44,
-        pinned: "left",
-        sortable: false,
-        filter: false,
-        resizable: false,
-        headerComponent: () => (
-          <input
-            type="checkbox"
-            className="checkbox checkbox-xs"
-            checked={groups.length > 0 && selectedNumbers.size === groups.length}
-            onChange={toggleSelectAll}
-          />
-        ),
-        cellRenderer: (p: ICellRendererParams<RentalGroup>) => (
-          <input
-            type="checkbox"
-            className="checkbox checkbox-xs"
-            checked={selectedNumbers.has(p.data!.rental_number)}
-            onChange={() => toggleSelect(p.data!.rental_number)}
-          />
-        ),
-      });
-    }
+    // 勾選與展開合在同一欄（箭頭在前、勾選框在後），單號改叫 ID，前面三欄省下一點寬度給資產與用途。
     defs.push({
       headerName: "",
       colId: "expand",
-      width: 44,
+      width: canExport ? 76 : 44,
+      pinned: "left",
       sortable: false,
       filter: false,
       resizable: false,
+      suppressHeaderMenuButton: true,
+      suppressHeaderFilterButton: true,
+      headerComponent: canExport
+        ? () => (
+            <input
+              type="checkbox"
+              className="checkbox checkbox-xs ml-8"
+              aria-label="全選"
+              checked={groups.length > 0 && selectedNumbers.size === groups.length}
+              onChange={toggleSelectAll}
+            />
+          )
+        : undefined,
       cellRenderer: "agGroupCellRenderer",
-      cellRendererParams: { suppressCount: true },
+      cellRendererParams: {
+        suppressCount: true,
+        innerRenderer: canExport
+          ? (p: ICellRendererParams<RentalGroup>) => (
+              <input
+                type="checkbox"
+                className="checkbox checkbox-xs"
+                aria-label={`勾選 ${p.data?.rental_number}`}
+                checked={!!p.data && selectedNumbers.has(p.data.rental_number)}
+                onChange={() => p.data && toggleSelect(p.data.rental_number)}
+              />
+            )
+          : undefined,
+      },
     });
     defs.push({
-      headerName: "單號",
+      headerName: "ID",
       field: "rental_number",
-      width: 110,
+      width: 56,
+      suppressHeaderMenuButton: true,
+      suppressHeaderFilterButton: true,
       cellRenderer: (p: ICellRendererParams<RentalGroup>) => (
         <span className="font-mono text-sm font-medium">
           {p.value}
@@ -607,7 +640,9 @@ export function Rentals() {
     defs.push({
       headerName: "資產",
       colId: "device",
-      minWidth: 200,
+      minWidth: 112,
+      flex: 2.2,
+      tooltipValueGetter: (p) => (p.data ? p.data.rentals.map((r) => r.device_name || r.asset_name || r.device_serial || r.asset_number || "-").join("、") : ""),
       valueGetter: (p) => {
         const r = p.data?.rentals[0];
         return r?.device_name || r?.asset_name || r?.device_serial || r?.asset_number || "";
@@ -629,12 +664,15 @@ export function Rentals() {
         );
       },
     });
-    defs.push({ headerName: "借用人", field: "borrower_name", width: 120, cellClass: "font-medium" });
-    defs.push({ headerName: "保管人", field: "custodian_name", width: 120, cellClass: "text-sm opacity-70", valueFormatter: (p) => p.value || "-" });
+    defs.push({ headerName: "借用人", field: "borrower_name", minWidth: 76, flex: 0.9, cellClass: "font-medium", suppressHeaderMenuButton: true, suppressHeaderFilterButton: true });
+    // 保管人與核准人預設不顯示（展開列的資訊卡看得到；要看可從右側「欄位」面板打開）
+    defs.push({ headerName: "保管人", field: "custodian_name", width: 100, hide: true, cellClass: "text-sm opacity-70", valueFormatter: (p) => p.value || "-" });
     defs.push({
       headerName: "用途",
       field: "purpose",
-      minWidth: 160,
+      minWidth: 100,
+      flex: 2,
+      tooltipValueGetter: (p) => p.data?.purpose || "",
       cellClass: "text-sm",
       cellRenderer: (p: ICellRendererParams<RentalGroup>) => (
         <span className="inline-flex items-center gap-1 max-w-full">
@@ -648,52 +686,49 @@ export function Rentals() {
     defs.push({
       headerName: "狀態",
       field: "status",
-      width: 120,
+      minWidth: 92,
+      flex: 0.9,
+      suppressHeaderMenuButton: true,
+      suppressHeaderFilterButton: true,
       cellRenderer: (p: ICellRendererParams<RentalGroup>) => {
         const sc = statusConfig[p.value as string] || statusConfig.pending;
         return <span className={`badge badge-sm gap-1 ${sc.badge}`}>{sc.icon} {sc.label}</span>;
       },
     });
+    // 借出日期與預計歸還合併成一欄：派發系統的預約顯示「11/26 09:16–17:16」，
+    // 其他租借顯示「10/30 – 11/02」「10/30 上午」；滑過去看完整日期。
     defs.push({
-      headerName: "借出日期",
+      headerName: "時段",
+      colId: "span",
       field: "borrow_date",
-      width: 170,
-      cellClass: "text-sm opacity-70",
-      tooltipValueGetter: (p) => (p.data ? rentalSpanText(p.data) : ""),
-      valueFormatter: (p) => {
-        if (!p.value) return "-";
-        const g = p.data as RentalGroup | undefined;
-        // 派發系統的預約到分鐘：顯示「11/26 09:16」
-        if (g?.start_at) return rentalPoint(g, "start");
-        const d = new Date(p.value as string).toLocaleDateString();
-        const per = g?.period;
-        return per && per !== "full" ? `${d} ${periodLabel[per]}` : d;
+      minWidth: 164,
+      flex: 1.5,
+      suppressHeaderMenuButton: true,
+      suppressHeaderFilterButton: true,
+      tooltipValueGetter: (p) => (p.data ? rentalSpanTitle(p.data) : ""),
+      cellRenderer: (p: ICellRendererParams<RentalGroup>) => {
+        const g = p.data;
+        if (!g) return null;
+        return (
+          <span className="inline-flex items-center gap-1 max-w-full">
+            <span className="truncate text-sm">{rentalSpanText(g)}</span>
+            {g.pending_extension && (
+              <span
+                className="badge badge-warning badge-xs whitespace-nowrap shrink-0"
+                title={`申請續借至 ${g.pending_extension.requested_expected_return}`}
+              >
+                續借
+              </span>
+            )}
+          </span>
+        );
       },
     });
-    defs.push({
-      headerName: "預計歸還",
-      field: "expected_return",
-      width: 170,
-      cellClass: "text-sm",
-      cellRenderer: (p: ICellRendererParams<RentalGroup>) => (
-        <span>
-          <span className="opacity-70">{p.data?.end_at ? rentalPoint(p.data, "end") : (p.value || "-")}</span>
-          {p.data?.pending_extension && (
-            <span
-              className="badge badge-warning badge-xs ml-1 whitespace-nowrap"
-              title={`申請續借至 ${p.data.pending_extension.requested_expected_return}`}
-            >
-              續借審核中
-            </span>
-          )}
-        </span>
-      ),
-    });
-    defs.push({ headerName: "核准人", field: "approver_name", width: 120, cellClass: "text-sm", valueFormatter: (p) => p.value || "-" });
+    defs.push({ headerName: "核准人", field: "approver_name", width: 100, hide: true, cellClass: "text-sm", valueFormatter: (p) => p.value || "-" });
     defs.push({
       headerName: "操作",
       colId: "actions",
-      width: 290,
+      width: 224,
       pinned: "right",
       sortable: false,
       filter: false,
@@ -718,10 +753,10 @@ export function Rentals() {
               <button onClick={() => openReturnDialog(g, "verify")} className="btn btn-info btn-xs gap-1"><CheckCircle size={12} /> 核對歸還</button>
             )}
             {g.status === "active" && g.daily_tracking_required && (isAdmin || g.borrower_id === user?.id) && (
-              <button onClick={() => openDailyReport(g)} className="btn btn-outline btn-xs gap-1"><Gauge size={12} /> 每日回報</button>
+              <button onClick={() => openDailyReport(g)} className="btn btn-outline btn-xs btn-square" title="每日回報" aria-label="每日回報"><Gauge size={14} /></button>
             )}
             {g.status === "active" && !g.pending_extension && (isAdmin || g.borrower_id === user?.id) && (
-              <button onClick={() => openExtendDialog(g)} className="btn btn-outline btn-xs gap-1"><CalendarPlus size={12} /> 續借</button>
+              <button onClick={() => openExtendDialog(g)} className="btn btn-outline btn-xs btn-square" title="續借" aria-label="續借"><CalendarPlus size={14} /></button>
             )}
             {g.status === "active" && g.pending_extension && canApprove(g) && (
               <button onClick={() => openReviewDialog(g)} className="btn btn-warning btn-xs gap-1"><CheckCircle size={12} /> 審核續借</button>
@@ -777,6 +812,9 @@ export function Rentals() {
             />
             顯示存查
           </label>
+          <button onClick={resetColumns} className="btn btn-ghost btn-sm gap-1" title="還原預設的欄位顯示、順序與寬度">
+            <Columns3 size={14} /> 重設欄位
+          </button>
           <button onClick={() => setShowCreate(true)} className="btn btn-primary btn-sm gap-1" data-tour="rental-create">
             <UserPlus size={14} /> 新增租借
           </button>
@@ -987,6 +1025,14 @@ export function Rentals() {
           loading={loading}
           getRowId={(p) => String(p.data.rental_number)}
           overlayNoRowsTemplate={`<span class="opacity-50">尚無租借記錄</span>`}
+          // DataGrid gives every column flex: 1 and minWidth: 80 by default; here only the columns that say
+          // so stretch (in proportion), each down to its own minimum, so that from about
+          // 1280px wide everything fits without scrolling behind the pinned 操作 column.
+          defaultColDef={{ flex: 0, minWidth: 40 }}
+          onGridReady={onGridReady}
+          onColumnVisible={saveColumnState}
+          onColumnMoved={saveColumnState}
+          onColumnResized={(e) => { if (e.finished) saveColumnState(); }}
           masterDetail
           detailCellRenderer={RentalDetailCard}
           // AG Grid defaults the detail row slot to 300px, which would clip a
