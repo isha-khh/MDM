@@ -22,16 +22,6 @@ export function rentalStartDate(r: Span): string {
   return r.start_at ? r.start_at.slice(0, 10) : r.borrow_date.slice(0, 10);
 }
 
-/** "11/26 09:16" for a timed rental's start or end, otherwise the date ("11/26"). */
-export function rentalPoint(r: Span, which: "start" | "end"): string {
-  if (r.start_at && r.end_at) {
-    const iso = which === "start" ? r.start_at : r.end_at;
-    return `${md(iso)} ${hm(iso)}`;
-  }
-  const date = which === "start" ? r.borrow_date : r.expected_return;
-  return date ? md(date) : "-";
-}
-
 /** One-line description of when: "11/26 09:16–17:16", "11/26 全天", "11/26 – 11/28". */
 export function rentalSpanText(r: Span): string {
   if (r.start_at && r.end_at) {
@@ -44,4 +34,14 @@ export function rentalSpanText(r: Span): string {
   const end = md(r.expected_return);
   if (start === end) return `${start} ${periodText[r.period || "full"]}`;
   return `${start} – ${end}`;
+}
+
+/** The same span with full dates for a tooltip: "2026-11-26 09:16 – 2026-11-26 17:16", "2026-10-30 – 2026-11-02". */
+export function rentalSpanTitle(r: Span): string {
+  if (r.start_at && r.end_at) {
+    return `${r.start_at.slice(0, 10)} ${hm(r.start_at)} – ${r.end_at.slice(0, 10)} ${hm(r.end_at)}`;
+  }
+  const start = r.borrow_date.slice(0, 10);
+  const per = r.period && r.period !== "full" ? ` ${periodText[r.period]}` : "";
+  return r.expected_return ? `${start} – ${r.expected_return.slice(0, 10)}${per}` : `${start} 起`;
 }
