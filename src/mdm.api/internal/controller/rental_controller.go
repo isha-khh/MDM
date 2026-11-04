@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -198,6 +199,7 @@ func (c *RentalController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/rentals-export", c.handleExport)
 	mux.HandleFunc("/api/rentals/", c.handleRentalByID)
 	mux.HandleFunc("/api/rentals-archive", c.handleArchive)
+	mux.HandleFunc("/api/rentals-unarchive", c.handleUnarchive)
 	mux.HandleFunc("/api/rental-pickable-assets", c.handlePickableAssets)
 	mux.HandleFunc("/api/rental-extensions/", c.handleExtensionDecision)
 }
@@ -1348,6 +1350,51 @@ func (c *RentalController) handleExport(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[rental-export] write error: %v", err)
 	}
 	f.Close()
+}
+
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// handleUnarchive godoc
+// @Summary 還原已存查的借用單（回到一般列表）
+// @Tags Rental
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param body body swagArchiveReq true "借用單 ID 列表"
+// @Success 200 {object} swagOK
+// @Failure 400 {object} swagError
+// @Router /api/rentals-unarchive [post]
+func (c *RentalController) handleUnarchive(w http.ResponseWriter, r *http.Request) {
+	claims, err := c.auth.RequireModule(r, "rental", "manager")
+	if err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.IDs) == 0 {
+		writeError(w, http.StatusBadRequest, "ids required")
+		return
+	}
+	for _, id := range body.IDs {
+		if !uuidPattern.MatchString(id) {
+			writeError(w, http.StatusBadRequest, "invalid id: "+id)
+			return
+		}
+	}
+	n, err := c.rentalRepo.Unarchive(r.Context(), body.IDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	log.Printf("[rental] unarchived %d rental rows by=%s", n, claims.Username)
+	writeJSON(w, map[string]interface{}{"ok": true, "count": n})
 }
 
 // handleArchive godoc
