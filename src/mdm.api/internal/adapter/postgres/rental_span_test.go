@@ -335,18 +335,30 @@ func TestHeldByAnother_BlocksHandingOverUntilTheCarIsBack(t *testing.T) {
 	}
 }
 
+// relDay is the date `offset` days from today in Taipei, as "YYYY-MM-DD". The
+// extension tests are about a rental that is out *now*, so their dates must move
+// with the clock (fixed dates stop meaning "later than now" as time passes).
+func relDay(offset int) string {
+	return time.Now().In(domain.TaipeiZone).AddDate(0, 0, offset).Format("2006-01-02")
+}
+
+func relDate(offset int) time.Time {
+	t, _ := time.Parse("2006-01-02", relDay(offset))
+	return t
+}
+
 func TestExtension_WouldConflictWithALaterReservation(t *testing.T) {
 	pool := testPool(t)
 	s, ext := newSeed(t, pool), NewRentalExtensionRepo(pool)
 	car := s.asset("CAR-6")
-	s.rental(car, rentalRow{status: "active", borrow: "2026-10-28", ret: sp("2026-10-30"), rentalNo: 500})
-	s.rental(car, rentalRow{status: "approved", borrow: "2026-11-02", ret: sp("2026-11-03"), rentalNo: 501}) // reserved later
+	s.rental(car, rentalRow{status: "active", borrow: relDay(-2), ret: sp(relDay(1)), rentalNo: 500})
+	s.rental(car, rentalRow{status: "approved", borrow: relDay(4), ret: sp(relDay(5)), rentalNo: 501}) // reserved later
 
-	d := func(day int) time.Time { return time.Date(2026, 11, day, 0, 0, 0, 0, time.UTC) }
+	d := relDate
 	for _, c := range []struct {
 		to   time.Time
 		want bool
-	}{{d(1), false}, {d(2), true}, {d(5), true}} {
+	}{{d(3), false}, {d(4), true}, {d(7), true}} {
 		got, err := ext.WouldConflict(context.Background(), 500, c.to)
 		if err != nil {
 			t.Fatal(err)
@@ -356,7 +368,7 @@ func TestExtension_WouldConflictWithALaterReservation(t *testing.T) {
 		}
 	}
 	// The reservation itself isn't affected by the check on someone else's rental.
-	if got, _ := ext.WouldConflict(context.Background(), 501, d(10)); got {
+	if got, _ := ext.WouldConflict(context.Background(), 501, d(12)); got {
 		t.Error("nothing is booked after the reservation")
 	}
 }
@@ -392,23 +404,23 @@ func TestExtension_ApprovalIsRefusedWhenItWouldCollide(t *testing.T) {
 	pool := testPool(t)
 	s, ext := newSeed(t, pool), NewRentalExtensionRepo(pool)
 	car := s.asset("CAR-8")
-	s.rental(car, rentalRow{status: "active", borrow: "2026-10-28", ret: sp("2026-10-30"), rentalNo: 700})
+	s.rental(car, rentalRow{status: "active", borrow: relDay(-2), ret: sp(relDay(1)), rentalNo: 700})
 	id, err := ext.Create(context.Background(), &domain.RentalExtension{
 		RentalNumber: 700, RequestedBy: s.user,
-		PreviousExpectedReturn: time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC), RequestedExpectedReturn: time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC),
+		PreviousExpectedReturn: relDate(1), RequestedExpectedReturn: relDate(5),
 		Reason: "延長",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// someone reserves the car for Nov 2 after the request was filed
-	s.rental(car, rentalRow{status: "approved", borrow: "2026-11-02", ret: sp("2026-11-02"), rentalNo: 701})
+	// someone reserves the car for a day inside the extension after the request was filed
+	s.rental(car, rentalRow{status: "approved", borrow: relDay(4), ret: sp(relDay(4)), rentalNo: 701})
 	if _, err := ext.Approve(context.Background(), id, s.user, ""); err != ErrExtensionConflict {
 		t.Fatalf("want ErrExtensionConflict, got %v", err)
 	}
 	var ret time.Time
 	pool.QueryRow(context.Background(), `SELECT expected_return FROM rentals WHERE rental_number=700`).Scan(&ret)
-	if ret.Format("2006-01-02") != "2026-10-30" {
+	if ret.Format("2006-01-02") != relDay(1) {
 		t.Errorf("a refused approval must not change the rental: %v", ret)
 	}
 	var status string
