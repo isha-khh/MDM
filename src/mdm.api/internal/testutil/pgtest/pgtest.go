@@ -50,6 +50,16 @@ func Pool(t *testing.T) *pgxpool.Pool {
 		ap.Exec(ctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
 		ap.Close()
 	})
+	Migrate(t, pool)
+	return pool
+}
+
+// Migrate applies every migration in order, the way the server does at each start:
+// a failing one is logged, not fatal. It can be called again on a database that
+// already has data — the server runs the migrations again at every restart, and
+// they must leave that data alone.
+func Migrate(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
 	_, here, _, _ := runtime.Caller(0)
 	files, _ := filepath.Glob(filepath.Join(filepath.Dir(here), "../../db/migrations/*.up.sql"))
 	sort.Strings(files)
@@ -58,9 +68,8 @@ func Pool(t *testing.T) *pgxpool.Pool {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(ctx, string(sqlText)); err != nil {
+		if _, err := pool.Exec(context.Background(), string(sqlText)); err != nil {
 			t.Logf("migration %s: %v", filepath.Base(f), err)
 		}
 	}
-	return pool
 }
